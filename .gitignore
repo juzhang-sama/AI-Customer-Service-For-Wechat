@@ -57,3 +57,13 @@ knowledge_base/
 uploads/
 config/ai_config.json
 
+# Build & Release
+dist/
+release/
+out/
+build/
+*.exe
+*.dmg
+*.AppImage
+*.asar
+
