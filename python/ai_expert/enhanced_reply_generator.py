@@ -17,6 +17,7 @@ from .intent_recognizer import IntentRecognizer, CustomerIntent
 from .customer_memory import CustomerMemory
 from .conversation_stage_manager import ConversationStageManager
 from .feedback_learner import FeedbackLearner
+from .pii_masker import PIIMasker
 
 class EnhancedReplyGenerator:
     """增强版回复生成器"""
@@ -32,6 +33,7 @@ class EnhancedReplyGenerator:
         self.stage_manager = ConversationStageManager(self.deepseek)
         self.kb_manager = kb_manager
         self.feedback_learner = FeedbackLearner(db_instance)
+        self.pii_masker = PIIMasker()
     
     def generate_three_versions(
         self,
@@ -73,13 +75,17 @@ class EnhancedReplyGenerator:
         start_time = time.time()
         
         try:
-            # ========== 改进点1: 智能上下文选择 ==========
+            # ========== Phase 5: PII 安全脱敏 (离开本地前处理) ==========
+            masked_customer_message = self.pii_masker.mask(customer_message)
+            
             if conversation_history:
+                # 脱敏上下文
+                masked_history = self.pii_masker.mask_chat_history(conversation_history)
                 selected_context, context_metadata = self.context_selector.select_context(
-                    conversation_history,
+                    masked_history,
                     max_tokens=2000,
                     min_messages=3,
-                    customer_message=customer_message,
+                    customer_message=masked_customer_message,
                     deepseek_adapter=self.deepseek
                 )
             else:
@@ -88,7 +94,7 @@ class EnhancedReplyGenerator:
                 formatted_messages = [
                     {
                         "role": "user" if msg['is_customer'] else "assistant",
-                        "content": msg['message'],
+                        "content": self.pii_masker.mask(msg['message']), # 脱敏处理
                         "timestamp": msg.get('timestamp')
                     }
                     for msg in messages
@@ -97,13 +103,13 @@ class EnhancedReplyGenerator:
                     formatted_messages,
                     max_tokens=2000,
                     min_messages=3,
-                    customer_message=customer_message,
+                    customer_message=masked_customer_message,
                     deepseek_adapter=self.deepseek
                 )
             
             # ========== 改进点2: 客户意图识别 ==========
             intent_result = self.intent_recognizer.recognize_intent(
-                customer_message,
+                masked_customer_message,
                 selected_context
             )
             customer_intent = intent_result['intent']
@@ -127,7 +133,7 @@ class EnhancedReplyGenerator:
                 try:
                     # 传入当前 prompt_id 进行过滤
                     results = self.kb_manager.search(
-                        query=customer_message, 
+                        query=masked_customer_message, 
                         bound_prompt_id=prompt_id,
                         top_k=3, 
                         threshold=0.4
@@ -188,7 +194,7 @@ class EnhancedReplyGenerator:
             
             # 添加当前消息到上下文
             full_context = selected_context + [
-                {"role": "user", "content": customer_message}
+                {"role": "user", "content": masked_customer_message}
             ]
             
             # ========== 生成三个版本（并发优化） ==========

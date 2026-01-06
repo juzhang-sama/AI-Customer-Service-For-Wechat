@@ -218,6 +218,28 @@ class AIExpertDatabase:
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        
+        # 12. 消息任务队列表 (Phase 5: Production Readiness)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS message_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                customer_name TEXT,
+                raw_message TEXT NOT NULL,
+                ai_reply_options TEXT, -- JSON 存储三个版本的回复
+                status TEXT DEFAULT 'PENDING', -- PENDING, PROCESSING, COMPLETED, SENT, FAILED
+                error_msg TEXT,
+                retry_count INTEGER DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # 创建索引提高查询效率
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_queue_status 
+            ON message_queue(status)
+        """)
 
         conn.commit()
         conn.close()
