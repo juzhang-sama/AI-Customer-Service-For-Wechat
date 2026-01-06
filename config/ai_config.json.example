@@ -1,0 +1,1 @@
+{"deepseek_api_key": "YOUR_API_KEY_HERE", "daily_budget": 10.0, "monthly_budget": 200.0, "warning_threshold": 0.8, "monitor_keyword": "¿Í»§", "monitor_match_mode": "contains"}

@@ -1,8 +1,0 @@
-{
-  "deepseek_api_key": "sk-023917736c6d4157a48075255dcd5d31",
-  "daily_budget": 10.0,
-  "monthly_budget": 200.0,
-  "warning_threshold": 0.8,
-  "monitor_keyword": "客户",
-  "monitor_match_mode": "contains"
-}

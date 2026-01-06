@@ -55,4 +55,5 @@ wheels/
 ai_expert/vector_store/
 knowledge_base/
 uploads/
+config/ai_config.json
 
