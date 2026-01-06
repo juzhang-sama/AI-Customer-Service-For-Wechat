@@ -12,6 +12,7 @@ from ai_expert.enhanced_reply_generator import EnhancedReplyGenerator
 from ai_expert.deepseek_adapter import DeepSeekAdapter
 from ai_expert.template_loader import TemplateLoader
 from ai_expert.knowledge_base_manager import KnowledgeBaseManager
+from ai_expert.message_queue_manager import MessageQueueManager
 import json
 import os
 
@@ -29,6 +30,9 @@ template_loader = TemplateLoader()
 
 # 初始化 RAG Knowledge Base Manager (全局单例，避免重复加载模型)
 kb_manager = KnowledgeBaseManager()
+
+# 初始化消息队列管理器
+queue_manager = MessageQueueManager(db)
 
 
 # API Key 管理（从配置文件读取）
@@ -1063,5 +1067,98 @@ def delete_document(doc_id):
             return jsonify({'success': True})
         else:
             return jsonify({'success': False, 'error': 'Document not found or failed to delete'}), 404
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# ========== Phase 5.5: 消息历史与任务持久化 API ==========
+
+@ai_expert_bp.route('/tasks/recent', methods=['GET'])
+def get_recent_tasks():
+    """获取最近的 AI 任务列表"""
+    try:
+        limit = request.args.get('limit', default=20, type=int)
+        # 获取所有任务，不仅仅是 PENDING
+        conn = db.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT * FROM message_queue 
+            ORDER BY created_at DESC 
+            LIMIT ?
+        """, (limit,))
+        rows = cursor.fetchall()
+        conn.close()
+        
+        tasks = []
+        for row in rows:
+            task = dict(row)
+            if task['ai_reply_options']:
+                task['ai_reply_options'] = json.loads(task['ai_reply_options'])
+            tasks.append(task)
+            
+        return jsonify({
+            'success': True,
+            'tasks': tasks
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@ai_expert_bp.route('/history/<session_id>', methods=['GET'])
+def get_session_history(session_id):
+    """获取特定会话的历史建议记录"""
+    try:
+        limit = request.args.get('limit', default=10, type=int)
+        
+        # 联查建议记录
+        conn = db.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT * FROM ai_suggestions 
+            WHERE session_id = ? 
+            ORDER BY created_at DESC 
+            LIMIT ?
+        """, (session_id, limit))
+        rows = cursor.fetchall()
+        conn.close()
+        
+        history = []
+        for row in rows:
+            item = dict(row)
+            # 解析 context
+            if item['context']:
+                try:
+                    item['context'] = json.loads(item['context'])
+                except:
+                    pass
+            history.append(item)
+            
+        return jsonify({
+            'success': True,
+            'session_id': session_id,
+            'history': history
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@ai_expert_bp.route('/tasks/<int:task_id>', methods=['GET'])
+def get_task_detail(task_id):
+    """获取单个任务详情"""
+    try:
+        conn = db.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM message_queue WHERE id = ?", (task_id,))
+        row = cursor.fetchone()
+        conn.close()
+        
+        if not row:
+            return jsonify({'success': False, 'error': 'Task not found'}), 404
+            
+        task = dict(row)
+        if task['ai_reply_options']:
+            task['ai_reply_options'] = json.loads(task['ai_reply_options'])
+            
+        return jsonify({
+            'success': True,
+            'task': task
+        })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500

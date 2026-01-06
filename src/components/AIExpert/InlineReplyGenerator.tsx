@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Sparkles, Copy, Send, Loader2, AlertCircle, Check, Edit2, Brain, Info, Zap, ChevronDown, ChevronUp } from 'lucide-react';
+import { Sparkles, Copy, Send, Loader2, AlertCircle, Check, Edit2, Brain, Info, Zap, ChevronDown, ChevronUp, History } from 'lucide-react';
+import ReplyHistorySidebar from './ReplyHistorySidebar';
 
 interface Message {
   session: string;
@@ -40,8 +41,8 @@ const TypingText: React.FC<{ text: string; speed?: number }> = ({ text, speed = 
   useEffect(() => {
     if (index < text.length) {
       const timeout = setTimeout(() => {
-        setDisplayedText((prev) => prev + text[index]);
-        setIndex((prev) => prev + 1);
+        setDisplayedText((prev: string) => prev + text[index]);
+        setIndex((prev: number) => prev + 1);
       }, speed);
       return () => clearTimeout(timeout);
     }
@@ -112,43 +113,36 @@ export const InlineReplyGenerator: React.FC<InlineReplyGeneratorProps> = ({
   const [stats, setStats] = useState<{ total_tokens: number; cost: number } | null>(null);
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
   const [lastSession, setLastSession] = useState<string | null>(null);
-  const [metadata, setMetadata] = useState<any>(null); // New state for thinking process
-  const [isTyping, setIsTyping] = useState(false); // Controls typewriter globally per generation
+  const [metadata, setMetadata] = useState<any>(null);
+  const [isTyping, setIsTyping] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const [lastTaskLoaded, setLastTaskLoaded] = useState<number | null>(null);
 
-  // Phase 3: 自我进化 (Feedback)
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editContent, setEditContent] = useState('');
-  const [sendingIndex, setSendingIndex] = useState<number | null>(null); // Track which reply is being sent
+  const [sendingIndex, setSendingIndex] = useState<number | null>(null);
 
-  // AI 专家选择
   const [aiExperts, setAiExperts] = useState<AIExpert[]>([]);
   const [selectedExpertId, setSelectedExpertId] = useState<number | null>(null);
 
-  // 加载 AI 专家列表
   useEffect(() => {
     const fetchExperts = async () => {
       try {
         const response = await fetch('http://localhost:5000/api/ai/prompts');
         const data = await response.json();
-
         if (data.success && Array.isArray(data.prompts)) {
           setAiExperts(data.prompts);
-
-          // 默认选择激活的专家
           const activeExpert = data.prompts.find((expert: AIExpert) => expert.is_active === 1);
-          if (activeExpert) {
-            setSelectedExpertId(activeExpert.id);
-          }
+          if (activeExpert) setSelectedExpertId(activeExpert.id);
         }
       } catch (error) {
         console.error('Failed to load AI experts:', error);
       }
     };
-
     fetchExperts();
   }, []);
 
-  // 当会话切换时，清空回复状态
   useEffect(() => {
     if (currentSession !== lastSession) {
       setReplies([]);
@@ -156,75 +150,76 @@ export const InlineReplyGenerator: React.FC<InlineReplyGeneratorProps> = ({
       setStats(null);
       setIsExpanded(false);
       setLastSession(currentSession);
+      setMetadata(null);
+      setLastTaskLoaded(null);
+
+      const recoverLastTask = async () => {
+        try {
+          const response = await fetch(`http://localhost:5000/api/ai/tasks/recent?limit=50`);
+          const data = await response.json();
+          if (data.success && Array.isArray(data.tasks)) {
+            const task = data.tasks.find((t: any) => t.session_id === currentSession);
+            if (task && task.ai_reply_options) {
+              const options = task.ai_reply_options;
+              setReplies([
+                { version: '版本1', content: options.aggressive, style: '进取型' },
+                { version: '版本2', content: options.conservative, style: '保守型' },
+                { version: '版本3', content: options.professional, style: '专业型' }
+              ]);
+              setIsExpanded(true);
+              setIsTyping(false);
+              setLastTaskLoaded(task.id);
+            }
+          }
+        } catch (err) {
+          console.error('Failed to recover last task:', err);
+        }
+      };
+
+      if (currentSession) recoverLastTask();
     }
   }, [currentSession, lastSession]);
 
   const handleGenerate = async () => {
     if (!currentSession) return;
-
     setLoading(true);
     setError(null);
-
     try {
       const customerMessages = messages.filter(msg => !msg.is_self);
       const lastCustomerMessage = customerMessages[customerMessages.length - 1];
-
       if (!lastCustomerMessage) {
         setError('没有找到客户消息');
         setLoading(false);
         return;
       }
-
       const response = await fetch('http://localhost:5000/api/ai/generate', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           session_id: currentSession,
           customer_message: lastCustomerMessage.content,
-          prompt_id: selectedExpertId,  // 传递用户选择的 AI 专家 ID
+          prompt_id: selectedExpertId,
           conversation_history: messages.slice(-10).map(msg => ({
             role: msg.is_self ? 'assistant' : 'user',
             content: msg.content
           }))
         })
       });
-
       const data = await response.json();
-
       if (data.success && data.suggestions) {
-        const formattedReplies: ReplyVersion[] = [
-          {
-            version: '版本1',
-            content: data.suggestions.aggressive,
-            style: '进取型'
-          },
-          {
-            version: '版本2',
-            content: data.suggestions.conservative,
-            style: '保守型'
-          },
-          {
-            version: '版本3',
-            content: data.suggestions.professional,
-            style: '专业型'
-          }
-        ];
-
-        setReplies(formattedReplies);
+        setReplies([
+          { version: '版本1', content: data.suggestions.aggressive, style: '进取型' },
+          { version: '版本2', content: data.suggestions.conservative, style: '保守型' },
+          { version: '版本3', content: data.suggestions.professional, style: '专业型' }
+        ]);
         setMetadata(data.metadata);
-        setStats({
-          total_tokens: data.tokens_used || 0,
-          cost: data.cost || 0
-        });
+        setStats({ total_tokens: data.tokens_used || 0, cost: data.cost || 0 });
         setIsExpanded(true);
         setIsTyping(true);
       } else {
         setError(data.error || '生成失败');
       }
     } catch (err) {
-      console.error('Generate error:', err);
       setError('网络连接失败，请检查后端服务器');
     } finally {
       setLoading(false);
@@ -236,54 +231,35 @@ export const InlineReplyGenerator: React.FC<InlineReplyGeneratorProps> = ({
       await navigator.clipboard.writeText(content);
       setCopiedIndex(index);
       setTimeout(() => setCopiedIndex(null), 2000);
-    } catch (err) {
-      console.error('Failed to copy:', err);
-    }
+    } catch (err) { }
   };
 
-  // 开启编辑模式
   const handleEdit = (content: string, index: number) => {
     setEditingIndex(index);
     setEditContent(content);
   };
 
-  // 取消编辑
   const cancelEdit = () => {
     setEditingIndex(null);
     setEditContent('');
   };
 
-  // 发送并上报反馈
   const handleSend = async (finalContent: string, originalContent?: string, index?: number) => {
     if (!currentSession) return;
     if (index !== undefined) setSendingIndex(index);
-
     try {
-      // 1. 发送消息
       const sendResponse = await fetch('http://localhost:5000/api/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          who: currentSession,
-          message: finalContent
-        })
+        body: JSON.stringify({ who: currentSession, message: finalContent })
       });
-
       const sendData = await sendResponse.json();
-
       if (sendData.status === 'success') {
-        if (onReplySelect) {
-          onReplySelect(finalContent);
-        }
-
-        // 2. 上报反馈 (Phase 3)
-        // 只有当我们知道原始回复时才上报 (即从 AI 列表发送的)
+        if (onReplySelect) onReplySelect(finalContent);
         if (originalContent) {
           const customerMessages = messages.filter(msg => !msg.is_self);
           const lastCustomerMessage = customerMessages[customerMessages.length - 1]?.content || '';
-
           const action = finalContent === originalContent ? 'ACCEPTED' : 'MODIFIED';
-
           await fetch('http://localhost:5000/api/ai/feedback', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -296,17 +272,12 @@ export const InlineReplyGenerator: React.FC<InlineReplyGeneratorProps> = ({
               prompt_id: selectedExpertId
             })
           });
-          console.log('[Feedback] Reported:', action);
         }
-
-        // 如果在编辑模式，关闭它
         setEditingIndex(null);
-
       } else {
         alert('发送失败：' + sendData.message);
       }
     } catch (err) {
-      console.error('Send error:', err);
       alert('发送失败，请检查网络连接');
     } finally {
       setSendingIndex(null);
@@ -317,193 +288,156 @@ export const InlineReplyGenerator: React.FC<InlineReplyGeneratorProps> = ({
     <div className="flex flex-col h-full bg-gradient-to-b from-gray-50/50 to-white/50 backdrop-blur-xl">
       {/* 标题栏 */}
       <div className="p-4 border-b border-white/20 bg-white/40 sticky top-0 z-10 backdrop-blur-md">
-        <h3 className="font-bold text-gray-800 flex items-center tracking-tight">
-          <Sparkles className="w-5 h-5 mr-2 text-purple-600 animate-pulse" />
-          <span className="bg-clip-text text-transparent bg-gradient-to-r from-purple-600 to-blue-600">
-            AI 智能回复 2.0
-          </span>
+        <h3 className="font-bold text-gray-800 flex items-center justify-between tracking-tight w-full">
+          <div className="flex items-center">
+            <Sparkles className="w-5 h-5 mr-2 text-purple-600 animate-pulse" />
+            <span className="bg-clip-text text-transparent bg-gradient-to-r from-purple-600 to-blue-600">
+              AI 智能回复 2.0
+            </span>
+          </div>
+          <button
+            onClick={() => setShowHistory(!showHistory)}
+            className={`p-2 rounded-lg transition-all ${showHistory ? 'bg-blue-100 text-blue-600' : 'text-gray-400 hover:bg-gray-100'}`}
+            title="查看历史记录"
+          >
+            <History className="w-4 h-4" />
+          </button>
         </h3>
       </div>
 
-      {/* AI 专家选择 */}
-      <div className="p-4 border-b border-white/10 bg-white/20 backdrop-blur-sm">
-        <label className="block text-xs font-semibold text-gray-500 uppercase tracking-widest mb-2 px-1">
-          当前 AI 专家
-        </label>
-        <select
-          value={selectedExpertId || ''}
-          onChange={(e) => setSelectedExpertId(Number(e.target.value))}
-          className="w-full px-4 py-2 bg-white/60 border border-white/40 rounded-xl text-sm font-medium text-gray-700 focus:ring-2 focus:ring-purple-400 focus:border-transparent outline-none transition-all hover:bg-white/80"
-        >
-          <option value="">使用默认配置</option>
-          {aiExperts.map((expert) => (
-            <option key={expert.id} value={expert.id}>
-              {expert.name} {expert.is_active === 1 ? '(激活)' : ''}
-            </option>
-          ))}
-        </select>
-      </div>
+      <div className="flex flex-1 overflow-hidden relative">
+        <div className={`flex flex-col flex-1 transition-all duration-300 ${showHistory ? 'mr-80' : ''}`}>
+          {/* AI 专家选择 */}
+          <div className="p-4 border-b border-white/10 bg-white/20 backdrop-blur-sm">
+            <label className="block text-xs font-semibold text-gray-500 uppercase tracking-widest mb-2 px-1">
+              当前 AI 专家
+            </label>
+            <select
+              value={selectedExpertId || ''}
+              onChange={(e) => setSelectedExpertId(Number(e.target.value))}
+              className="w-full px-4 py-2 bg-white/60 border border-white/40 rounded-xl text-sm font-medium text-gray-700 focus:ring-2 focus:ring-purple-400 focus:border-transparent outline-none transition-all hover:bg-white/80"
+            >
+              <option value="">使用默认配置</option>
+              {aiExperts.map((expert) => (
+                <option key={expert.id} value={expert.id}>
+                  {expert.name} {expert.is_active === 1 ? '(激活)' : ''}
+                </option>
+              ))}
+            </select>
+          </div>
 
-      {/* 生成按钮 */}
-      <div className="p-4">
-        <button
-          onClick={handleGenerate}
-          disabled={loading || !currentSession}
-          className="group relative w-full overflow-hidden py-3.5 bg-gradient-to-r from-purple-600 to-blue-600 text-white rounded-2xl font-bold transition-all hover:scale-[1.02] active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-purple-500/20"
-        >
-          <div className="relative z-10 flex items-center justify-center space-x-2">
-            {loading ? (
-              <>
-                <Loader2 className="w-5 h-5 animate-spin" />
-                <span>正在思考中...</span>
-              </>
-            ) : (
-              <>
-                <Zap className="w-4 h-4 group-hover:animate-bounce" />
-                <span>立即生成回复</span>
-              </>
+          {/* 生成按钮 */}
+          <div className="p-4">
+            <button
+              onClick={handleGenerate}
+              disabled={loading || !currentSession}
+              className="group relative w-full overflow-hidden py-3.5 bg-gradient-to-r from-purple-600 to-blue-600 text-white rounded-2xl font-bold transition-all hover:scale-[1.02] active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-purple-500/20"
+            >
+              <div className="relative z-10 flex items-center justify-center space-x-2">
+                {loading ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    <span>正在思考中...</span>
+                  </>
+                ) : (
+                  <>
+                    <Zap className="w-4 h-4 group-hover:animate-bounce" />
+                    <span>立即生成回复</span>
+                  </>
+                )}
+              </div>
+              <div className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 -translate-x-full group-hover:translate-x-full transition-transform duration-1000" />
+            </button>
+          </div>
+
+          {/* 回复内容区域 */}
+          <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-4">
+            <ThinkingProcess metadata={metadata} />
+            {error && (
+              <div className="p-4 bg-red-500/10 border border-red-200/50 backdrop-blur-md rounded-2xl flex items-start space-x-3">
+                <AlertCircle className="w-5 h-5 text-red-500 mt-0.5 flex-shrink-0" />
+                <p className="text-sm text-red-800 font-medium">{error}</p>
+              </div>
             )}
-          </div>
-          <div className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 -translate-x-full group-hover:translate-x-full transition-transform duration-1000" />
-        </button>
-      </div>
 
-      {/* 回复内容区域 */}
-      <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-4">
-        {/* Thinking Process Visualization */}
-        <ThinkingProcess metadata={metadata} />
+            {replies.map((reply, index) => (
+              <div key={index} className="group p-4 rounded-2xl border border-white/40 bg-white/40 backdrop-blur-md shadow-sm transition-all hover:shadow-md hover:bg-white/60">
+                <div className="flex items-center justify-between mb-3">
+                  <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${reply.style === '进取型' ? 'bg-orange-100 text-orange-600' : reply.style === '保守型' ? 'bg-blue-100 text-blue-600' : 'bg-purple-100 text-purple-600'}`}>
+                    {reply.style}
+                  </span>
+                  {editingIndex !== index && (
+                    <button onClick={() => handleEdit(reply.content, index)} className="opacity-0 group-hover:opacity-100 p-1.5 rounded-lg text-gray-400 hover:text-blue-500 hover:bg-blue-50">
+                      <Edit2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
 
-        {/* 错误提示 */}
-        {error && (
-          <div className="p-4 bg-red-500/10 border border-red-200/50 backdrop-blur-md rounded-2xl flex items-start space-x-3 animate-in fade-in zoom-in duration-300">
-            <AlertCircle className="w-5 h-5 text-red-500 mt-0.5 flex-shrink-0" />
-            <p className="text-sm text-red-800 font-medium">{error}</p>
-          </div>
-        )}
+                {editingIndex === index ? (
+                  <div className="space-y-3">
+                    <textarea value={editContent} onChange={(e) => setEditContent(e.target.value)} className="w-full text-sm p-3 bg-white/80 border border-blue-200 rounded-xl focus:ring-2 focus:ring-blue-400 outline-none min-h-[100px]" autoFocus />
+                    <div className="flex justify-end space-x-2">
+                      <button onClick={cancelEdit} className="px-4 py-2 text-xs font-semibold text-gray-500 hover:bg-gray-100 rounded-xl">取消</button>
+                      <button onClick={() => handleSend(editContent, reply.content, index)} disabled={sendingIndex === index} className="px-4 py-2 bg-blue-600 text-white rounded-xl text-xs font-bold hover:bg-blue-700 disabled:opacity-50 flex items-center space-x-2">
+                        {sendingIndex === index ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+                        <span>发送修改</span>
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div className="text-sm text-gray-800 leading-relaxed mb-4 whitespace-pre-wrap font-medium">
+                      {isTyping ? <TypingText text={reply.content} /> : reply.content}
+                    </div>
+                    <div className="flex items-center space-x-3">
+                      <button onClick={() => handleCopy(reply.content, index)} className="flex-1 py-2.5 px-3 bg-white/80 border border-gray-200 rounded-xl text-xs font-bold text-gray-700 hover:bg-white transition-all flex items-center justify-center space-x-2">
+                        {copiedIndex === index ? <><Check className="w-4 h-4 text-green-500" /><span>已复制</span></> : <><Copy className="w-4 h-4 text-gray-400" /><span>复制</span></>}
+                      </button>
+                      <button onClick={() => handleSend(reply.content, reply.content, index)} disabled={sendingIndex === index} className="flex-1 py-2.5 px-3 bg-gradient-to-br from-blue-500 to-indigo-600 text-white rounded-xl text-xs font-bold hover:shadow-lg transition-all flex items-center justify-center space-x-2">
+                        {sendingIndex === index ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                        <span>直接发送</span>
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            ))}
 
-        {/* 回复列表 */}
-        {replies.map((reply, index) => (
-          <div
-            key={index}
-            className={`group p-4 rounded-2xl border border-white/40 bg-white/40 backdrop-blur-md shadow-sm transition-all hover:shadow-md hover:bg-white/60 animate-in fade-in slide-in-from-bottom-4 duration-500 fill-mode-both`}
-            style={{ animationDelay: `${index * 150}ms` }}
-          >
-            <div className="flex items-center justify-between mb-3">
-              <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${reply.style === '进取型' ? 'bg-orange-100 text-orange-600' :
-                reply.style === '保守型' ? 'bg-blue-100 text-blue-600' :
-                  'bg-purple-100 text-purple-600'
-                }`}>
-                {reply.style}
-              </span>
-              {/* 编辑按钮 */}
-              {editingIndex !== index && (
-                <button
-                  onClick={() => handleEdit(reply.content, index)}
-                  className="opacity-0 group-hover:opacity-100 p-1.5 rounded-lg text-gray-400 hover:text-blue-500 hover:bg-blue-50 transition-all"
-                >
-                  <Edit2 className="w-3.5 h-3.5" />
-                </button>
-              )}
-            </div>
-
-            {editingIndex === index ? (
-              // 编辑模式
-              <div className="space-y-3 animate-in zoom-in-95 duration-200">
-                <textarea
-                  value={editContent}
-                  onChange={(e) => setEditContent(e.target.value)}
-                  className="w-full text-sm p-3 bg-white/80 border border-blue-200 rounded-xl focus:ring-2 focus:ring-blue-400 outline-none min-h-[100px] shadow-inner"
-                  autoFocus
-                />
-                <div className="flex justify-end space-x-2">
-                  <button
-                    onClick={cancelEdit}
-                    className="px-4 py-2 text-xs font-semibold text-gray-500 hover:bg-gray-100 rounded-xl transition-colors"
-                  >
-                    取消
-                  </button>
-                  <button
-                    onClick={() => handleSend(editContent, reply.content, index)}
-                    disabled={sendingIndex === index}
-                    className="px-4 py-2 bg-blue-600 text-white rounded-xl text-xs font-bold hover:bg-blue-700 active:scale-95 disabled:opacity-50 flex items-center space-x-2 shadow-md"
-                  >
-                    {sendingIndex === index ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <Send className="w-3.5 h-3.5" />
-                    )}
-                    <span>发送修改</span>
-                  </button>
+            {stats && (
+              <div className="p-4 bg-gradient-to-br from-green-400/10 to-emerald-400/20 border border-green-200/50 backdrop-blur-md rounded-2xl">
+                <div className="flex items-center justify-between text-xs mb-1.5">
+                  <span className="text-gray-500 font-medium">本次响应成本</span>
+                  <span className="font-extrabold text-green-700">¥ {stats.cost.toFixed(4)}</span>
+                </div>
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-gray-500 font-medium">消耗 Token</span>
+                  <span className="font-bold text-gray-700">{stats.total_tokens}</span>
                 </div>
               </div>
-            ) : (
-              // 展示模式
-              <>
-                <div className="text-sm text-gray-800 leading-relaxed mb-4 whitespace-pre-wrap font-medium">
-                  {isTyping ? <TypingText text={reply.content} /> : reply.content}
-                </div>
+            )}
 
-                <div className="flex items-center space-x-3">
-                  <button
-                    onClick={() => handleCopy(reply.content, index)}
-                    className="flex-1 py-2.5 px-3 bg-white/80 border border-gray-200 rounded-xl text-xs font-bold text-gray-700 hover:bg-white hover:shadow-sm transition-all flex items-center justify-center space-x-2"
-                  >
-                    {copiedIndex === index ? (
-                      <>
-                        <Check className="w-4 h-4 text-green-500" />
-                        <span className="text-green-600">已复制</span>
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="w-4 h-4 text-gray-400" />
-                        <span>复制</span>
-                      </>
-                    )}
-                  </button>
-                  <button
-                    onClick={() => handleSend(reply.content, reply.content, index)}
-                    disabled={sendingIndex === index}
-                    className="flex-1 py-2.5 px-3 bg-gradient-to-br from-blue-500 to-indigo-600 text-white rounded-xl text-xs font-bold hover:shadow-lg hover:shadow-blue-500/30 active:scale-[0.98] transition-all flex items-center justify-center space-x-2"
-                  >
-                    {sendingIndex === index ? (
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                    ) : (
-                      <Send className="w-4 h-4" />
-                    )}
-                    <span>直接发送</span>
-                  </button>
-                </div>
-              </>
+            {replies.length === 0 && !error && !loading && (
+              <div className="text-center py-20">
+                <Sparkles className="w-16 h-16 text-purple-200 animate-pulse mx-auto mb-4" />
+                <p className="text-sm font-bold text-gray-400">点击上方按钮，开启 AI 智能辅助</p>
+              </div>
             )}
           </div>
-        ))}
+        </div>
 
-        {/* 统计信息 */}
-        {stats && (
-          <div className="p-4 bg-gradient-to-br from-green-400/10 to-emerald-400/20 border border-green-200/50 backdrop-blur-md rounded-2xl animate-in fade-in duration-700">
-            <div className="flex items-center justify-between text-xs mb-1.5">
-              <span className="text-gray-500 font-medium">本次响应成本</span>
-              <span className="font-extrabold text-green-700">¥ {stats.cost.toFixed(4)}</span>
-            </div>
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-gray-500 font-medium">消耗 Token</span>
-              <span className="font-bold text-gray-700">{stats.total_tokens}</span>
-            </div>
-          </div>
-        )}
-
-        {/* 空状态提示 */}
-        {replies.length === 0 && !error && !loading && (
-          <div className="text-center py-20 animate-in fade-in duration-1000">
-            <div className="relative inline-block mb-4">
-              <Sparkles className="w-16 h-16 text-purple-200 animate-pulse" />
-              <Zap className="absolute -top-1 -right-1 w-6 h-6 text-yellow-300 animate-bounce" />
-            </div>
-            <p className="text-sm font-bold text-gray-400">点击上方按钮，开启 AI 智能辅助</p>
+        {/* History Sidebar */}
+        {showHistory && (
+          <div className="absolute right-0 top-0 bottom-0 w-80 border-l border-white/20 bg-white shadow-2xl z-20 animate-in slide-in-from-right duration-300">
+            <ReplyHistorySidebar
+              currentSession={currentSession}
+              onSelectHistoricalReply={(content) => {
+                setEditContent(content);
+                setEditingIndex(2);
+              }}
+            />
           </div>
         )}
       </div>
     </div>
   );
 };
-
