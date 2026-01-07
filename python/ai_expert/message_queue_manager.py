@@ -55,6 +55,22 @@ class MessageQueueManager:
         conn.close()
         return [dict(row) for row in rows]
 
+    def get_kanban_tasks(self, limit: int = 50) -> List[Dict]:
+        """获取看板任务（包括待处理、处理中、已生成待审阅）"""
+        conn = self.db.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT * FROM message_queue 
+            WHERE status IN ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED')
+            ORDER BY created_at DESC 
+            LIMIT ?
+        """, (limit,))
+        
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+
     def update_status(self, queue_id: int, status: str, ai_reply_options: Dict = None, error_msg: str = None):
         """更新任务状态"""
         conn = self.db.get_connection()
@@ -78,11 +94,21 @@ class MessageQueueManager:
         try:
             cursor.execute(query, tuple(params))
             conn.commit()
-            logger.info(f"Updated queue task {queue_id} to status: {status}")
+            logger.info(f"[Queue] Updated task {queue_id} to status: {status}")
         except Exception as e:
-            logger.error(f"Failed to update status for {queue_id}: {e}")
+            logger.error(f"[Queue Error] Failed to update status for {queue_id}: {e}")
         finally:
             conn.close()
+
+    def get_task_by_id(self, task_id: int) -> Optional[Dict]:
+        """按 ID 获取特定任务"""
+        conn = self.db.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT * FROM message_queue WHERE id = ?", (task_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row) if row else None
 
     def get_task_by_session(self, session_id: str) -> Optional[Dict]:
         """获取特定会话的最新任务"""

@@ -1,6 +1,6 @@
-import { Home, Settings, Users, Brain } from 'lucide-react';
+import { Home, Settings, Users, Brain, BarChart2 } from 'lucide-react';
 
-type Page = 'dashboard' | 'ai-expert' | 'settings';
+type Page = 'dashboard' | 'ai-expert' | 'settings' | 'kanban' | 'analytics';
 
 interface SidebarProps {
     currentPage: Page;
@@ -10,6 +10,8 @@ interface SidebarProps {
 const Sidebar = ({ currentPage, onNavigate }: SidebarProps) => {
     const menuItems = [
         { icon: Home, label: '首页', page: 'dashboard' as Page },
+        { icon: Users, label: '批量处理', page: 'kanban' as Page },
+        { icon: BarChart2, label: '业务洞察', page: 'analytics' as Page },
         { icon: Brain, label: 'AI专家搭建', page: 'ai-expert' as Page },
         { icon: Settings, label: '系统设置', page: 'settings' as Page },
     ];
@@ -29,11 +31,10 @@ const Sidebar = ({ currentPage, onNavigate }: SidebarProps) => {
                         <button
                             key={index}
                             onClick={() => onNavigate(item.page)}
-                            className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition-all duration-200 group ${
-                                currentPage === item.page
-                                    ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/50'
-                                    : 'text-slate-400 hover:bg-slate-800 hover:text-white'
-                            }`}
+                            className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition-all duration-200 group ${currentPage === item.page
+                                ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/50'
+                                : 'text-slate-400 hover:bg-slate-800 hover:text-white'
+                                }`}
                         >
                             <item.icon size={20} className={`${currentPage === item.page ? 'text-white' : 'text-slate-400 group-hover:text-white'}`} />
                             <span className="font-medium">{item.label}</span>

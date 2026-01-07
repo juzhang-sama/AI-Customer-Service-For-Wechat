@@ -14,17 +14,36 @@ class WeChatAutomation:
         
     def _get_window(self):
         """获取微信主窗口并处理最小化/遮挡"""
-        # Try simplified search first
-        window = auto.WindowControl(Name='微信', searchDepth=1)
+        # 1. 优先通过类名查找（最稳妥，不受语言和未读数影响）
+        window = auto.WindowControl(ClassName='WeChatMainWndForPC', searchDepth=1)
+        
+        # 2. 备选：通过中英文名称查找
+        if not window.Exists(0.5):
+            window = auto.WindowControl(Name='微信', searchDepth=1)
+            
         if not window.Exists(0):
-            # Fallback to ClassName
-            window = auto.WindowControl(ClassName='WeChatMainWndForPC', searchDepth=1)
+            window = auto.WindowControl(Name='Weixin', searchDepth=1)
+        
+        # 3. 兜底：模糊匹配包含“微信”的窗口
+        if not window.Exists(0):
+             # 这种方式较慢，作为最后的手段
+             for w in auto.GetRootControl().GetChildren():
+                 if '微信' in w.Name or 'Weixin' in w.Name:
+                     window = w
+                     break
         
         if window.Exists(0):
             self.window = window
             # 处理最小化
-            if window.IsMinimized():
-                logger.info("WeChat window is minimized, restoring...")
+            try:
+                # 使用标准的 WindowPattern 获取视觉状态
+                pattern = window.GetWindowPattern()
+                if pattern and pattern.WindowVisualState == auto.WindowVisualState.Minimized:
+                    logger.info("WeChat window is minimized, restoring...")
+                    window.Restore()
+            except Exception as e:
+                # 兼容性兜底：如果无法获取状态，尝试恢复
+                logger.debug(f"Could not verify minimized state, trying restore: {e}")
                 window.Restore()
             return True
         return False
@@ -43,32 +62,60 @@ class WeChatAutomation:
         return False
 
     def get_current_chat_title(self):
-        """获取当前打开的聊天会话标题"""
+        """[WeChat NT 适配] 获取当前聊天窗口标题"""
         try:
-            # 在微信 3.9+ 中，顶部聊天对象通常是一个 TextControl
-            # 位于主窗口头部的特定位置
-            header = self.window.PaneControl(Name="消息") # 侧边栏
-            # 通常在主窗口的右侧面板顶部
-            # 这里简化处理：寻找当前窗口中所有的 TextControl 并根据层级定位
-            # 或者直接定位主界面顶部的联系人名称
+            # 1. 尝试直接定位聊天窗口顶部的标题 (通常是第一个较大的非功能性文本)
+            # 在 NT 版微信中，标题通常位于右侧面板顶部的 Pane 内
+            # 我们寻找所有 TextControl，取第一个 Name 较长且不属于导航栏的
             
-            # 改进方案：寻找聊天记录上方的联系人姓名
-            # 微信的主界面结构复杂，这里使用相对可靠的定位方式
+            # 先尝试找最有可能的：Name 为非空且不包含基础功能的 Text
+            # 我们通过限制搜索深度并避开左侧导航栏（左边距通常较小）来实现
+            all_texts = self.window.TextControls()
+            for text in all_texts:
+                name = text.Name
+                rect = text.BoundingRectangle
+                if name and name not in ["微信", "Weixin", "搜索", "通讯录", "收藏", "朋友圈", "消息"]:
+                    # 标题通常在窗口的中间偏右位置，高度在顶部 100 像素内
+                    if rect.top < self.window.BoundingRectangle.top + 100:
+                        if rect.left > self.window.BoundingRectangle.left + 150: # 跳过左侧边栏
+                             return name
+            
+            # 兜底：如果上述策略失效，返回第一个找到的 TextControl 名称
             chat_title_element = self.window.TextControl(searchDepth=15, foundIndex=1)
-            # 注意：这步可能因微信版本不同而异，生产环境建议结合多种方式
             return chat_title_element.Name
-        except:
+        except Exception as e:
+            logger.debug(f"Error getting chat title: {e}")
             return None
 
     def _verify_chat_title(self, target_who):
-        """核对当前会话标题是否匹配目标联系人"""
+        """核对当前会话标题 (强化鲁棒性)"""
         actual_title = self.get_current_chat_title()
-        logger.info(f"Actual chat title: {actual_title}, Target: {target_who}")
+        logger.info(f"Actual chat title detected: '{actual_title}', Expected part of: '{target_who}'")
         
         if not actual_title:
+            # 如果完全抓不到标题，但在搜索后已进入会话，我们尝试第二种验证：
+            # 检查窗口中是否存在一个包含 target_who 的 TextControl
+            try:
+                if self.window.TextControl(SubName=target_who).Exists(0):
+                    logger.info("Title element verified via SubName search.")
+                    return True
+            except:
+                pass
             return False
             
-        # 支持模糊匹配（处理备注、群聊人数等）
+        # 规范化：移除空格/括号/未读数后缀
+        import re
+        def clean(s):
+            return re.sub(r'[\s\(\)（）\-\_\d]+', '', s)
+            
+        target_clean = clean(target_who)
+        actual_clean = clean(actual_title)
+        
+        # 支持模糊双层匹配
+        if target_clean in actual_clean or actual_clean in target_clean:
+            return True
+            
+        # 如果还是不通过，最后一次机会：直接包含匹配
         return target_who in actual_title or actual_title in target_who
 
     def send_message(self, who, message):
@@ -95,15 +142,21 @@ class WeChatAutomation:
             time.sleep(1.2) # 等待搜索结果
             
             # 3. 确认识选第一个结果
-            # 有时搜出多个人，这里假设第一个是最匹配的
             search_box.SendKeys('{Enter}')
-            time.sleep(0.8)
+            time.sleep(1.5) # 给 NT 版 UI 更多的渲染时间
             
             # --- 增加生产级核对步骤 ---
-            # 4. 核对当前打开的是否是正确的人 (关键安全防线)
-            if not self._verify_chat_title(who):
-                logger.warning(f"Title mismatch! Expected {who}, but UI shows different. Aborting.")
-                return {"status": "error", "message": f"UI Verification failed: Title mismatch. Target: {who}"}
+            # 4. 核对当前打开的是否是正确的人 (带重试机制)
+            verified = False
+            for attempt in range(3):
+                if self._verify_chat_title(who):
+                    verified = True
+                    break
+                logger.warning(f"Verification attempt {attempt+1} failed, retrying...")
+                time.sleep(0.8)
+                
+            if not verified:
+                return {"status": "error", "message": f"UI Verification failed: Title mismatch after 3 attempts. Target: {who}"}
             
             # 5. 确保输入框获得焦点
             # 利用快捷键 Alt+S (发送) 或 Alt+C (清理) 之外，最稳妥是定位输入框

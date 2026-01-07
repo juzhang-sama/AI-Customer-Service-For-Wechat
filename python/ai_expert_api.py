@@ -13,8 +13,11 @@ from ai_expert.deepseek_adapter import DeepSeekAdapter
 from ai_expert.template_loader import TemplateLoader
 from ai_expert.knowledge_base_manager import KnowledgeBaseManager
 from ai_expert.message_queue_manager import MessageQueueManager
+from ai_expert.background_processor import BackgroundProcessor
+from ai_expert.analytics_manager import AnalyticsManager
 import json
 import os
+import threading
 
 # 创建 Blueprint
 ai_expert_bp = Blueprint('ai_expert', __name__, url_prefix='/api/ai')
@@ -34,6 +37,11 @@ kb_manager = KnowledgeBaseManager()
 # 初始化消息队列管理器
 queue_manager = MessageQueueManager(db)
 
+# 初始化数据分析引擎
+analytics_manager = AnalyticsManager(db)
+
+# 全局后台处理器实例
+bg_processor = None
 
 # API Key 管理（从配置文件读取）
 def get_api_key():
@@ -46,6 +54,21 @@ def get_api_key():
             return config.get('deepseek_api_key', '')
     
     return ''
+
+def start_background_worker():
+    """初始化并启动后台预生成服务"""
+    global bg_processor
+    api_key = get_api_key()
+    if not api_key:
+        print("[AI Expert] Warning: API key not found, background worker not started.")
+        return
+
+    from ai_expert.enhanced_reply_generator import EnhancedReplyGenerator
+    generator = EnhancedReplyGenerator(api_key, db, kb_manager=kb_manager)
+    
+    bg_processor = BackgroundProcessor(db, queue_manager, generator)
+    bg_processor.start()
+    print("[AI Expert] Background worker pipeline initialized and running.")
 
 # ========== 配置管理模块已合并到下方 [配置管理 API] 区域 ==========
 
@@ -196,6 +219,33 @@ def update_prompt(prompt_id):
             'error': str(e)
         }), 500
 
+@ai_expert_bp.route('/prompts/<int:prompt_id>/full-update', methods=['POST'])
+def full_update_prompt(prompt_id):
+    """一键全量保存：Prompt 配置 + 关键词规则 + 预设问答（事务化版本）"""
+    try:
+        data = request.json
+        print(f"[API] Full update triggered for prompt {prompt_id}")
+
+        # 生成最新的 System Prompt
+        system_prompt = prompt_builder.build_system_prompt(data)
+        data['system_prompt'] = system_prompt
+
+        # 使用底层的原子事务方法，一次锁表，一次完成，彻底解决 Deadlock
+        db.full_update_prompt_transactional(prompt_id, data)
+
+        return jsonify({
+            'success': True,
+            'prompt_id': prompt_id,
+            'message': 'Full configuration updated atomically'
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
 @ai_expert_bp.route('/prompts/<int:prompt_id>/activate', methods=['POST'])
 def activate_prompt(prompt_id):
     """激活配置"""
@@ -879,7 +929,7 @@ def get_keywords():
 
         return jsonify({
             'success': True,
-            'rules': rules
+            'keywords': rules  # 修改为 keywords 以保持前端一致性
         })
 
     except Exception as e:
@@ -1072,6 +1122,22 @@ def delete_document(doc_id):
 
 # ========== Phase 5.5: 消息历史与任务持久化 API ==========
 
+@ai_expert_bp.route('/tasks/<int:task_id>/status', methods=['POST'])
+def update_task_status(task_id):
+    """更新单个任务的状态"""
+    try:
+        data = request.json
+        status = data.get('status')
+        error_msg = data.get('error_msg')
+        
+        if not status:
+            return jsonify({'success': False, 'error': 'Missing status'}), 400
+            
+        queue_manager.update_status(task_id, status, error_msg=error_msg)
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 @ai_expert_bp.route('/tasks/recent', methods=['GET'])
 def get_recent_tasks():
     """获取最近的 AI 任务列表"""
@@ -1162,3 +1228,164 @@ def get_task_detail(task_id):
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+# ========== 消息队列与看板 API (Phase 7: Batch Processing) ==========
+
+@ai_expert_bp.route('/tasks/kanban', methods=['GET'])
+def get_kanban_tasks():
+    """获取看板所需的批量任务列表"""
+    try:
+        limit = request.args.get('limit', 50, type=int)
+        tasks = queue_manager.get_kanban_tasks(limit)
+        
+        # 确保 ai_reply_options 是解析后的 JSON
+        for task in tasks:
+            if task.get('ai_reply_options'):
+                try:
+                    task['ai_reply_options'] = json.loads(task['ai_reply_options'])
+                except:
+                    pass
+                    
+        return jsonify({
+            'success': True,
+            'tasks': tasks
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@ai_expert_bp.route('/tasks/bulk-generate', methods=['POST'])
+def bulk_generate_replies():
+    """批量触发 PENDING 状态任务的 AI 生成"""
+    try:
+        data = request.json
+        prompt_id = data.get('prompt_id')
+        task_ids = data.get('task_ids', []) # 可选：指定任务 ID 列表
+        
+        # 如果没传 prompt_id，使用默认激活的
+        if not prompt_id:
+            active_prompt = db.get_active_prompt()
+            if not active_prompt:
+                return jsonify({'success': False, 'error': 'No active prompt found'}), 400
+            prompt_id = active_prompt['id']
+        else:
+            active_prompt = db.get_prompt_by_id(prompt_id)
+
+        # 获取待处理任务
+        if task_ids:
+            pending_tasks = [t for t in [queue_manager.get_task_by_id(tid) for tid in task_ids] if t and t['status'] == 'PENDING']
+        else:
+            pending_tasks = queue_manager.get_pending_tasks(limit=10) # 默认处理前 10 条
+            
+        if not pending_tasks:
+            return jsonify({'success': True, 'count': 0, 'message': 'No pending tasks'})
+
+        api_key = get_api_key()
+        generator = EnhancedReplyGenerator(api_key, db, kb_manager=kb_manager)
+        
+        # 批量处理逻辑
+        processed_count = 0
+        for task in pending_tasks:
+            try:
+                # 更新状态为 PROCESSING 防止重复执行
+                queue_manager.update_status(task['id'], 'PROCESSING')
+                
+                # 构造生成所需的配置
+                system_prompt_config = {
+                    'role_definition': active_prompt.get('role_definition', ''),
+                    'business_logic': active_prompt.get('business_logic', ''),
+                    'tone_style': active_prompt.get('tone_style', 'professional'),
+                    'reply_length': active_prompt.get('reply_length', 'medium'),
+                    'emoji_usage': active_prompt.get('emoji_usage', 'occasional'),
+                    'knowledge_base': json.loads(active_prompt.get('knowledge_base', '[]')),
+                    'forbidden_words': json.loads(active_prompt.get('forbidden_words', '[]'))
+                }
+                
+                # 获取简单的历史记录（此处可扩展）
+                history = db.get_recent_messages(task['session_id'], limit=5)
+                
+                # 执行生成
+                result = generator.generate_three_versions(
+                    session_id=task['session_id'],
+                    customer_message=task['raw_message'],
+                    system_prompt_config=system_prompt_config,
+                    prompt_id=prompt_id,
+                    conversation_history=history
+                )
+                
+                if result['success']:
+                    # 更新状态为 COMPLETED 并存储建议
+                    queue_manager.update_status(
+                        task['id'], 
+                        'COMPLETED', 
+                        ai_reply_options={
+                            'aggressive': result['aggressive'],
+                            'conservative': result['conservative'],
+                            'professional': result['professional']
+                        }
+                    )
+                    processed_count += 1
+                else:
+                    queue_manager.update_status(task['id'], 'FAILED', error_msg=result.get('error'))
+                    
+            except Exception as task_err:
+                print(f"[Bulk Gen Error] Task {task['id']}: {task_err}")
+                queue_manager.update_status(task['id'], 'FAILED', error_msg=str(task_err))
+
+        return jsonify({
+            'success': True,
+            'processed_count': processed_count,
+            'total_found': len(pending_tasks)
+        })
+
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# ========== Phase 8: 智能数据仪表盘 API ==========
+
+@ai_expert_bp.route('/analytics/dashboard', methods=['GET'])
+def get_analytics_dashboard():
+    """获取仪表盘全量统计数据"""
+    try:
+        overview = analytics_manager.get_overview_stats()
+        trends = analytics_manager.get_daily_trends(limit_days=7)
+        keywords = analytics_manager.get_hot_keywords(top_n=12)
+        efficiency = analytics_manager.get_ai_efficiency()
+        
+        # AI 洞察逻辑 (调用大模型，设置超时保护以免阻塞大屏显示)
+        insights = "点击刷新或稍后再试以获取 AI 经营简报。"
+        try:
+            api_key = get_api_key()
+            if api_key:
+                def generator_fn(prompt):
+                    from ai_expert.deepseek_adapter import DeepSeekAdapter
+                    # 可以在这里设置更短的超时，或者使用线程池
+                    adapter = DeepSeekAdapter(api_key)
+                    return adapter.chat(prompt, system_prompt="你是一位商业分析助手。")
+
+                # 设置获取洞察的最长等待时间（例如 8 秒）
+                # 这里简单处理：如果失败则降级
+                insights = analytics_manager.get_ai_insights(generator_fn)
+        except Exception as ai_err:
+            print(f"[Analytics AI Error] {ai_err}")
+            insights = "AI 简报生成超时或失败，但不影响核心数据查看。"
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'overview': overview,
+                'trends': trends,
+                'keywords': keywords,
+                'efficiency': efficiency,
+                'insights': insights
+            }
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500

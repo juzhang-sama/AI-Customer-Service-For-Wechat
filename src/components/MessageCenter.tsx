@@ -52,21 +52,55 @@ const MessageCenter = () => {
         return sessions[b].lastTime.localeCompare(sessions[a].lastTime);
     });
 
+    const heartbeatTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const lastHeartbeatRef = useRef<number>(Date.now());
+
     const connectSSE = () => {
         if (eventSourceRef.current) eventSourceRef.current.close();
+        if (heartbeatTimerRef.current) clearInterval(heartbeatTimerRef.current);
 
         setIsRetrying(true);
         const es = new EventSource('http://127.0.0.1:5000/api/messages/stream');
         eventSourceRef.current = es;
+        lastHeartbeatRef.current = Date.now();
+
+        // 启动连接监视器：如果 30 秒没动静（包括心跳），判为僵尸连接，强制重启
+        const monitorInterval = setInterval(() => {
+            const now = Date.now();
+            if (now - lastHeartbeatRef.current > 30000) {
+                console.warn("[SSE] Watchdog detected zombie connection, reconnecting...");
+                setIsConnected(false);
+                setIsRetrying(true);
+                es.close();
+                clearInterval(monitorInterval);
+                setTimeout(connectSSE, 2000);
+            }
+        }, 10000);
+        heartbeatTimerRef.current = monitorInterval;
 
         es.onopen = () => {
+            console.log("[SSE] Connected to backend message stream");
             setIsConnected(true);
             setIsRetrying(false);
+            lastHeartbeatRef.current = Date.now();
         };
 
         es.onmessage = (event) => {
+            lastHeartbeatRef.current = Date.now(); // 只要有任何数据流（哪怕是心跳），就刷新活跃时间
+
             try {
-                const msg: Message = JSON.parse(event.data);
+                // 忽略非数据包（如有）
+                if (!event.data) return;
+
+                const data = JSON.parse(event.data);
+
+                // 🔧 关键修复：如果是心跳包，直接跳过解析，仅用于刷新活跃时间（已在上面完成）
+                if (data.type === 'heartbeat' || !data.session) {
+                    console.log("[SSE] Received heartbeat at", data.time);
+                    return;
+                }
+
+                const msg: Message = data;
                 const sid = msg.session;
 
                 setSessions(prev => {
@@ -90,21 +124,26 @@ const MessageCenter = () => {
                     };
                 });
             } catch (e) {
-                console.error("Parse error:", e);
+                // console.log("SSE non-json or heartbeat received:", event.data);
             }
         };
 
-        es.onerror = () => {
+        es.onerror = (err) => {
+            console.error("[SSE] Connection error:", err);
             setIsConnected(false);
             setIsRetrying(true);
             es.close();
+            clearInterval(monitorInterval);
             setTimeout(connectSSE, 5000);
         };
     };
 
     useEffect(() => {
         connectSSE();
-        return () => eventSourceRef.current?.close();
+        return () => {
+            eventSourceRef.current?.close();
+            if (heartbeatTimerRef.current) clearInterval(heartbeatTimerRef.current);
+        };
     }, []);
 
     // 删除单条消息
@@ -289,8 +328,8 @@ const MessageCenter = () => {
                                             )}
                                         </div>
                                         <div className={`p-3.5 rounded-2xl shadow-sm border ${msg.is_self
-                                                ? 'bg-[#95ec69] border-[#89d961] text-gray-800 rounded-tr-none'
-                                                : 'bg-white border-gray-200 text-gray-800 rounded-tl-none'
+                                            ? 'bg-[#95ec69] border-[#89d961] text-gray-800 rounded-tr-none'
+                                            : 'bg-white border-gray-200 text-gray-800 rounded-tl-none'
                                             }`}>
                                             <p className="text-[13px] leading-relaxed whitespace-pre-wrap">{msg.content}</p>
                                         </div>

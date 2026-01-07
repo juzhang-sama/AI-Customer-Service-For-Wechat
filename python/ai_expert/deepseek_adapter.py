@@ -56,83 +56,106 @@ class DeepSeekAdapter:
             "stream": stream
         }
         
+        max_retries = 3
+        retry_delay = 1.0  # Initial delay 1s
+        backoff_factor = 2.0
+        
+        attempt = 0
         start_time = time.time()
         
-        try:
-            response = requests.post(
-                self.base_url,
-                headers=headers,
-                json=data,
-                timeout=self.timeout
-            )
-            
-            response_time = time.time() - start_time
-            
-            if response.status_code != 200:
-                raise Exception(f"API Error: {response.status_code} - {response.text}")
-            
-            result = response.json()
-            
-            # 极致安全的提取方式
-            choices = result.get("choices", [])
-            if not choices:
-                return {
-                    "success": False,
-                    "error": f"API 返回结果结构异常 (无 choices): {json.dumps(result, ensure_ascii=False)}"
-                }
-            
-            message = choices[0].get("message", {})
-            content = message.get("content", "")
-            
-            if not content and not result.get("usage"):
-                 return {
-                    "success": False,
-                    "error": f"API 返回空内容或异常结构: {json.dumps(result, ensure_ascii=False)}"
-                }
+        while attempt <= max_retries:
+            try:
+                if attempt > 0:
+                    print(f"[DeepSeek] Retrying request (Attempt {attempt}/{max_retries}) after {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    retry_delay *= backoff_factor
 
-            usage = result.get("usage", {})
+                response = requests.post(
+                    self.base_url,
+                    headers=headers,
+                    json=data,
+                    timeout=self.timeout
+                )
+                
+                response_time = time.time() - start_time
+                
+                # Check for retryable status codes
+                if response.status_code in [429, 500, 502, 503, 504]:
+                    if attempt < max_retries:
+                        attempt += 1
+                        continue
+                    else:
+                        raise Exception(f"API Error after {max_retries} retries: {response.status_code} - {response.text}")
+                
+                if response.status_code != 200:
+                    raise Exception(f"API Error: {response.status_code} - {response.text}")
+                
+                result = response.json()
+                
+                # 极致安全的提取方式
+                choices = result.get("choices", [])
+                if not choices:
+                    return {
+                        "success": False,
+                        "error": f"API 返回结果结构异常 (无 choices): {json.dumps(result, ensure_ascii=False)}"
+                    }
+                
+                message = choices[0].get("message", {})
+                content = message.get("content", "")
+                
+                if not content and not result.get("usage"):
+                     return {
+                        "success": False,
+                        "error": f"API 返回空内容或异常结构: {json.dumps(result, ensure_ascii=False)}"
+                    }
+
+                usage = result.get("usage", {})
+                
+                prompt_tokens = usage.get("prompt_tokens", 0)
+                completion_tokens = usage.get("completion_tokens", 0)
+                total_tokens = usage.get("total_tokens", 0)
+                
+                # 计算费用
+                cost = calculate_deepseek_cost(prompt_tokens, completion_tokens)
+                
+                return {
+                    "content": content,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens,
+                    "cost": cost,
+                    "response_time": response_time,
+                    "success": True,
+                    "error": None
+                }
+                
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                if attempt < max_retries:
+                    attempt += 1
+                    continue
+                else:
+                    return {
+                        "content": "",
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0,
+                        "cost": 0.0,
+                        "response_time": time.time() - start_time,
+                        "success": False,
+                        "error": f"请求超时/连接失败，已重试 {max_retries} 次: {str(e)}"
+                    }
             
-            prompt_tokens = usage.get("prompt_tokens", 0)
-            completion_tokens = usage.get("completion_tokens", 0)
-            total_tokens = usage.get("total_tokens", 0)
-            
-            # 计算费用
-            cost = calculate_deepseek_cost(prompt_tokens, completion_tokens)
-            
-            return {
-                "content": content,
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": total_tokens,
-                "cost": cost,
-                "response_time": response_time,
-                "success": True,
-                "error": None
-            }
-            
-        except requests.exceptions.Timeout:
-            return {
-                "content": "",
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
-                "cost": 0.0,
-                "response_time": time.time() - start_time,
-                "success": False,
-                "error": "请求超时，请稍后重试"
-            }
-        
-        except Exception as e:
-            return {
-                "content": "",
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
-                "cost": 0.0,
-                "response_time": time.time() - start_time,
-                "success": False,
-                "error": str(e)
-            }
+            except Exception as e:
+                return {
+                    "content": "",
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                    "cost": 0.0,
+                    "response_time": time.time() - start_time,
+                    "success": False,
+                    "error": str(e)
+                }
     
     def chat_stream(
         self,

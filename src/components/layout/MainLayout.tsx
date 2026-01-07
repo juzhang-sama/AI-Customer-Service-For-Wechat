@@ -1,6 +1,6 @@
 import Sidebar from './Sidebar';
 
-type Page = 'dashboard' | 'ai-expert' | 'settings';
+type Page = 'dashboard' | 'ai-expert' | 'settings' | 'kanban' | 'analytics';
 
 interface MainLayoutProps {
     children: React.ReactNode;
@@ -11,6 +11,8 @@ interface MainLayoutProps {
 const pageTitle: Record<Page, string> = {
     'dashboard': '仪表盘',
     'ai-expert': 'AI 专家配置',
+    'kanban': '批量处理看板',
+    'analytics': '业务洞察中心',
     'settings': '系统设置'
 };
 

@@ -5,63 +5,64 @@ setlocal enabledelayedexpansion
 
 echo.
 echo ========================================
-echo      dt-ai-helper - 生产级启动器
+echo      dt-ai-helper - Server Starter
 echo ========================================
 echo.
 
-cd /d "%~dp0"
+set PROJECT_ROOT=%~dp0
+cd /d "%PROJECT_ROOT%"
 
-REM 1. 清理冲突进程
-echo [1/4] 正在清理旧的进程...
+REM Cleanup old processes
+echo [1/4] Cleaning up old processes...
 taskkill /F /IM python.exe /T >nul 2>&1
 taskkill /F /IM node.exe /T >nul 2>&1
 timeout /t 1 >nul
 
-REM 2. 检查 Python 环境
-echo [2/4] 检查后端运行环境...
+REM Check Python environment
+echo [2/4] Checking backend environment...
 if exist .venv\Scripts\activate.bat (
-    echo [OK] Python 虚拟环境正常.
+    echo [OK] Python venv found.
 ) else (
-    echo [ERROR] 未找到 .venv 文件夹! 
-    echo 请先运行: python -m venv .venv
+    echo [ERROR] .venv folder not found! 
+    echo Please run: python -m venv .venv
     pause
     exit /b 1
 )
 
-REM 3. 检查 Node.js 环境
-echo [3/4] 检查前端运行环境...
+REM Check Node.js environment
+echo [3/4] Checking frontend environment...
 if exist node_modules (
-    echo [OK] 依赖库 (node_modules) 正常.
+    echo [OK] node_modules found.
 ) else (
-    echo [WARNING] 未找到 node_modules, 正在尝试自动安装 (npm install)...
+    echo [WARNING] node_modules not found, installing...
     call npm install
 )
 
-REM 4. 启动服务
+REM Start services
 echo.
-echo [4/4] 正在启动全量服务...
+echo [4/4] Starting services...
 
-REM 启动后端并重定向日志
 if not exist logs mkdir logs
-echo 正在启动后端 (Port 5000)...
-start "Backend - Flask" cmd /c "cd /d "%~dp0" && call .venv\Scripts\activate.bat && python python\api_server.py > logs\backend.log 2>&1"
+
+echo Starting Backend (Port 5000)...
+start "Backend - Flask" cmd /k "cd /d "%PROJECT_ROOT%" && call .venv\Scripts\activate.bat && python python\api_server.py"
 
 timeout /t 3 >nul
 
-echo 正在启动前端 (Port 5173)...
-start "Frontend - Vite" cmd /c "cd /d "%~dp0" && npm run dev > logs\frontend.log 2>&1"
+echo Starting Frontend (Port 5173)...
+start "Frontend - Vite" cmd /c "cd /d "%PROJECT_ROOT%" && npm run dev > logs\frontend.log 2>&1"
 
 echo.
 echo ========================================
-echo      服务已进入后台运行状态
+echo      Services are running in background
 echo ========================================
 echo.
-echo 后端访问地址:  http://localhost:5000
-echo 前端访问地址:  http://localhost:5173
+echo Backend:  http://localhost:5000
+echo Frontend: http://localhost:5173
 echo.
-echo 实时日志请查看: logs/ 目录
+echo Logs are in logs/ directory
 echo.
-echo 【提示】请不要关闭弹出的两个黑窗口。
+echo [TIP] Please do not close the two popup windows.
 echo.
 pause
 

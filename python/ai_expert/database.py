@@ -16,9 +16,11 @@ class AIExpertDatabase:
         self.init_database()
     
     def get_connection(self):
-        """获取数据库连接"""
-        conn = sqlite3.connect(self.db_path)
+        """获取数据库连接，增强并发能力"""
+        conn = sqlite3.connect(self.db_path, timeout=30.0) # 提高超时容忍度
         conn.row_factory = sqlite3.Row  # 返回字典格式
+        # 开启 WAL 模式，支持并发读写，减少 Database Locked 概率
+        conn.execute("PRAGMA journal_mode=WAL")
         return conn
     
     def init_database(self):
@@ -247,7 +249,7 @@ class AIExpertDatabase:
         # 执行数据库迁移（添加缺失的列）
         self._migrate_database()
 
-        print("✅ AI Expert database initialized successfully")
+        print("[OK] AI Expert database initialized successfully")
     
     def _migrate_database(self):
         """数据库迁移：添加缺失的列"""
@@ -260,24 +262,24 @@ class AIExpertDatabase:
             columns = {row[1] for row in cursor.fetchall()}
             
             if 'tokens_used' not in columns:
-                print("🔄 正在添加 tokens_used 列到 ai_suggestions 表...")
+                print("[INFO] Adding tokens_used column to ai_suggestions table...")
                 cursor.execute("""
                     ALTER TABLE ai_suggestions 
                     ADD COLUMN tokens_used INTEGER DEFAULT 0
                 """)
-                print("✅ tokens_used 列已添加")
+                print("[OK] tokens_used column added")
             
             if 'cost' not in columns:
-                print("🔄 正在添加 cost 列到 ai_suggestions 表...")
+                print("[INFO] Adding cost column to ai_suggestions table...")
                 cursor.execute("""
                     ALTER TABLE ai_suggestions 
                     ADD COLUMN cost REAL DEFAULT 0.0
                 """)
-                print("✅ cost 列已添加")
+                print("[OK] cost column added")
             
             conn.commit()
         except sqlite3.OperationalError as e:
-            print(f"⚠️ 数据库迁移提示: {e}")
+            print(f"[WARN] Database migration note: {e}")
             # 列可能已存在，忽略错误
             pass
         finally:
@@ -394,6 +396,78 @@ class AIExpertDatabase:
 
         conn.commit()
         conn.close()
+
+    def full_update_prompt_transactional(self, prompt_id: int, data: Dict):
+        """
+        [原子性修复] 全量更新事务。
+        一次性完成：配置更新 + 旧规则清理 + 新规则插入。
+        有效预防 Database Locked 并彻底清除历史冗余。
+        """
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("BEGIN TRANSACTION")
+
+            # 1. 更新主配置
+            cursor.execute("""
+                UPDATE ai_prompts SET
+                    name = ?,
+                    role_definition = ?,
+                    business_logic = ?,
+                    tone_style = ?,
+                    reply_length = ?,
+                    emoji_usage = ?,
+                    knowledge_base = ?,
+                    forbidden_words = ?,
+                    system_prompt = ?,
+                    updated_at = ?
+                WHERE id = ?
+            """, (
+                data['name'],
+                data.get('role_definition', ''),
+                data.get('business_logic', ''),
+                data.get('tone_style', 'professional'),
+                data.get('reply_length', 'medium'),
+                data.get('emoji_usage', 'occasional'),
+                json.dumps(data.get('knowledge_base', []), ensure_ascii=False),
+                json.dumps(data.get('forbidden_words', []), ensure_ascii=False),
+                data.get('system_prompt', ''),
+                datetime.now(),
+                prompt_id
+            ))
+
+            # 2. 清理并重写关键词规则
+            cursor.execute("DELETE FROM keyword_rules WHERE prompt_id = ?", (prompt_id,))
+            keywords = data.get('keywords', [])
+            for kw in keywords:
+                cursor.execute("""
+                    INSERT INTO keyword_rules (prompt_id, keyword, match_type, priority)
+                    VALUES (?, ?, ?, ?)
+                """, (prompt_id, kw.get('keyword'), kw.get('match_type', 'contains'), kw.get('priority', 0)))
+
+            # 3. 清理并重写预设问答
+            cursor.execute("DELETE FROM preset_qa WHERE prompt_id = ?", (prompt_id,))
+            preset_qa = data.get('preset_qa', [])
+            for qa in preset_qa:
+                # 兼容多种格式
+                q_pattern = qa.get('question_pattern')
+                if not q_pattern and qa.get('question_patterns'):
+                    q_pattern = qa['question_patterns'][0]
+                
+                if q_pattern:
+                    cursor.execute("""
+                        INSERT INTO preset_qa (prompt_id, question_pattern, answer, match_type, priority)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (prompt_id, q_pattern, qa.get('answer'), qa.get('match_type', 'contains'), qa.get('priority', 0)))
+
+            conn.commit()
+            print(f"[DB] Full transactional update success for prompt {prompt_id}")
+        except Exception as e:
+            conn.rollback()
+            print(f"[DB ERROR] Transaction failed: {e}")
+            raise e
+        finally:
+            conn.close()
 
     def activate_prompt(self, prompt_id: int):
         """激活指定配置（同时取消其他配置）"""

@@ -127,8 +127,23 @@ class EnhancedReplyGenerator:
                 'last_objection_type': objection_type.value if objection_type else None
             })
             
-            # ========== 改进点5 (RAG): 检索知识库 ==========
+            # ========== 改进点5 (RAG): 检索知识库与预设问答 ==========
             retrieved_knowledge = []
+            
+            # 5a. 首先尝试匹配“预设问答” (Preset QA) - 优先级最高
+            try:
+                preset_answer = self.db.match_preset_answer(
+                    prompt_id=prompt_id, 
+                    question=masked_customer_message,
+                    deepseek_adapter=self.deepseek # 启用语义匹配
+                )
+                if preset_answer:
+                    print(f"[RAG] Preset QA Hit!")
+                    retrieved_knowledge.append(f"[官方标准回答] {preset_answer}")
+            except Exception as e:
+                print(f"[RAG] Preset QA matching failed: {e}")
+
+            # 5b. 检索文档知识库 (Vector Search)
             if self.kb_manager and customer_message:
                 try:
                     # 传入当前 prompt_id 进行过滤
@@ -136,14 +151,17 @@ class EnhancedReplyGenerator:
                         query=masked_customer_message, 
                         bound_prompt_id=prompt_id,
                         top_k=3, 
-                        threshold=0.4
+                        threshold=0.35 # 稍微调低阈值以增加召回
                     )
                     if results:
-                        print(f"[RAG] Hit {len(results)} chunks")
+                        print(f"[RAG] Vector Search Hit {len(results)} chunks")
                         for res in results:
-                            retrieved_knowledge.append(f"[相关资料: {res['source']}] {res['content']}")
+                            # 避免重复
+                            knowledge_item = f"[参考资料: {res['source']}] {res['content']}"
+                            if knowledge_item not in retrieved_knowledge:
+                                retrieved_knowledge.append(knowledge_item)
                 except Exception as e:
-                    print(f"[RAG] Search failed: {e}")
+                    print(f"[RAG] Vector Search failed: {e}")
 
             # 合并检索到的知识到配置中
             if retrieved_knowledge:

@@ -22,6 +22,7 @@ class WeChatMessageListener(threading.Thread):
         self.config_mtime = 0
         self.monitor_keyword = '客户'
         self.monitor_match_mode = 'contains'  # 默认使用包含匹配
+        self.is_first_scan = True # 初次扫描标志
         self._check_config_reload()  # 初始加载
 
     def _check_config_reload(self):
@@ -48,13 +49,30 @@ class WeChatMessageListener(threading.Thread):
                 self.monitor_match_mode = 'contains'
 
     def find_window(self):
-        self.window = auto.WindowControl(ClassName='mmui::MainWindow', searchDepth=1)
+        # 1. 优先通过类名查找（最稳妥）
+        self.window = auto.WindowControl(ClassName='WeChatMainWndForPC', searchDepth=1)
+        if not self.window.Exists(0):
+             self.window = auto.WindowControl(ClassName='mmui::MainWindow', searchDepth=1)
+        
+        # 2. 备选：通过中英文名称查找
         if not self.window.Exists(0):
             self.window = auto.WindowControl(Name='微信', searchDepth=1)
+        if not self.window.Exists(0):
+            self.window = auto.WindowControl(Name='Weixin', searchDepth=1)
         
-        if self.window.Exists(0):
+        # 3. 兜底：模糊匹配
+        if not self.window.Exists(0):
+            for w in auto.GetRootControl().GetChildren():
+                if '微信' in w.Name or 'Weixin' in w.Name:
+                    self.window = w
+                    break
+        
+        if self.window and self.window.Exists(0):
             # Try to cache session list control
+            # 兼容不同版本的 ListControl 名称
             self.session_list = self.window.ListControl(Name='会话')
+            if not self.session_list.Exists(0):
+                self.session_list = self.window.ListControl(Name='SessionList')
             return True
         return False
 
@@ -65,19 +83,21 @@ class WeChatMessageListener(threading.Thread):
         if not name: return None, 0, "", False, ""
         
         # 1. 提取并清除未读数，同时规范化空格
+        # 微信新版可能同时出现 "272条未读" 和 "[272条]"
         unread_match = re.search(r'(\d+)条未读', name)
         unread_count = int(unread_match.group(1)) if unread_match else 0
         
-        # 将已知干扰标签替换为空格，然后合并连续空格并 strip
-        temp_name = re.sub(r'\d+条未读', ' ', name)
+        # 将已知干扰标签替换为空格
+        temp_name = name
+        temp_name = re.sub(r'\[\d+条\]', ' ', temp_name) # 新版格式 [272条]
+        temp_name = re.sub(r'\d+条未读', ' ', temp_name)
         temp_name = re.sub(r'已置顶', ' ', temp_name)
         temp_name = re.sub(r'消息免打扰', ' ', temp_name)
         
-        # 规范化空格：将所有连续空白字符替换为单个空格
+        # 规范化空格
         normalized_name = re.sub(r'\s+', ' ', temp_name).strip()
         
         # 2. 提取时间后缀
-        # 支持: 16:02, 昨天, 星期一, 2024/12/30 等常见微信格式
         time_pattern = r'\s?(\d{1,2}:\d{2}|昨天|星期.|前天|\d{1,2}/\d{1,2}|\d{4}/\d{1,2}/\d{1,2})$'
         time_match = re.search(time_pattern, normalized_name)
         time_tag = time_match.group(0).strip() if time_match else ""
@@ -86,21 +106,21 @@ class WeChatMessageListener(threading.Thread):
         clean_body = re.sub(time_pattern, '', normalized_name).strip()
         
         # 3. 提取会话名和消息主体
-        parts = clean_body.split(' ', 1)
-        session_name = parts[0]
-        content = parts[1] if len(parts) > 1 else ""
+        # 策略：如果包含"-", 通常格式是 "客户-姓名 内容"
+        # 否则按第一个空格分割
+        if ' ' in clean_body:
+            parts = clean_body.split(' ', 1)
+            session_name = parts[0]
+            content = parts[1] if len(parts) > 1 else ""
+        else:
+            session_name = clean_body
+            content = ""
         
-        # 4. 身份判定逻辑 - 基于微信NT版本的实际格式
-        # 微信NT版本的消息格式: '联系人名 [未读数] 消息内容 时间'
-        # 关键发现：微信NT版本不使用"我:"前缀
-        # 判断方法：
-        #   - 有未读数 = 对方发送的新消息
-        #   - 无未读数 = 我发送的消息（发送后未读数清零）
-
+        # 4. 身份判定逻辑
         is_self = False
         display_sender = session_name
 
-        # 方法1：检查是否有"我:"等前缀（兼容旧版本）
+        # 方法1：检查属性前缀
         self_indicators = ["我: ", "我:", "我：", "我 :"]
         for indicator in self_indicators:
             if content.startswith(indicator):
@@ -194,31 +214,61 @@ class WeChatMessageListener(threading.Thread):
                     continue
 
                 # 3. 构造状态一致性标识
-                # 这个标识必须在“红点存在”和“红点消失”时保持绝对一致
-                # 我们直接使用清理掉标签后的 normalized_name (即 昵称 + 内容 + 时间)
-                # 补充：在 parse_session_name 中合并了所有干扰项
-                # 重新计算状态标识以防万一
-                state_id = re.sub(r'\d+条未读|已置顶|消息免打扰', ' ', raw_name)
+                # 🔧 增强：必须剥离所有版本的未读干扰，包括 [272条]
+                state_id = raw_name
+                state_id = re.sub(r'\[\d+条\]', ' ', state_id)
+                state_id = re.sub(r'\d+条未读', ' ', state_id)
+                state_id = re.sub(r'已置顶', ' ', state_id)
+                state_id = re.sub(r'消息免打扰', ' ', state_id)
                 state_id = re.sub(r'\s+', ' ', state_id).strip()
 
                 # 4. 状态对比与上报
+                is_update = False
                 if nickname not in self.last_states:
                     self.last_states[nickname] = state_id
-                    print(f"[DEBUG] 初始化状态: '{nickname}' -> '{state_id}' (不推送初始消息)")
-                elif self.last_states[nickname] != state_id:
-                    print(f"[DEBUG] 状态变化: '{nickname}' 从 '{self.last_states[nickname]}' 变为 '{state_id}'")
+                    # 🔧 初次扫描：如果有未读且是客户，必须立即补发
+                    if self.is_first_scan and unread > 0 and not is_self:
+                        print(f"[监听器] 初次发现积压消息: {nickname}")
+                        is_update = True
+                    else:
+                        continue
+                
+                if not is_update and self.last_states[nickname] != state_id:
+                    print(f"[监听器] 状态变动: {nickname}")
+                    is_update = True
 
-                    # 🔧 关键修复：使用未读数来判断消息发送者
-                    # - 有未读数(unread > 0) = 对方发送的新消息
-                    # - 无未读数(unread == 0) = 我发送的消息
+                if is_update:
+
+                    # 🔧 判定逻辑优化（修复版）：
+                    # 1. 有未读数 (unread > 0) → 100% 是对方发来的消息
+                    # 2. 无未读数且有"我:"前缀 → 明确是我的消息
+                    # 3. 无未读数且无前缀 → 根据之前状态判断
+                    
                     if unread > 0:
+                        # 有未读数，100% 是对方消息
                         final_is_self = False
                         final_sender = nickname
-                        print(f"[DEBUG] 未读数={unread} > 0，判断为【对方】消息")
-                    else:
+                    elif is_self:
+                        # 内容明确带有 "我:" 前缀
                         final_is_self = True
                         final_sender = "我"
-                        print(f"[DEBUG] 未读数={unread} == 0，判断为【我的】消息")
+                    else:
+                        # 🔧 关键修复：无未读数 + 状态变化 + 无明确前缀
+                        prev_state = self.last_states.get(nickname, "")
+                        prev_had_unread = bool(re.search(r'(\d+)条未读|\[\d+条\]', prev_state))
+                        
+                        if prev_had_unread:
+                            # 之前有未读，现在没了 → 标记为对方消息
+                            final_is_self = False
+                            final_sender = nickname
+                            print(f"[DEBUG] 未读数清零，判定为对方历史消息")
+                        else:
+                            # 之前就没未读，现在状态变了 → 我发了新消息
+                            final_is_self = True
+                            final_sender = "我"
+                            print(f"[DEBUG] 无未读状态变化，判定为我的新消息")
+                    
+                    print(f"[DEBUG] 最终判定: {'【我的】' if final_is_self else '【对方】'} 消息 (unread={unread})")
 
                     msg_data = {
                         "session": nickname,
@@ -248,9 +298,10 @@ class WeChatMessageListener(threading.Thread):
             while not self.stop_event.is_set():
                 self._check_config_reload() # 扫描前检查配置是否更新
                 self.scan()
-                time.sleep(0.5) # 加快扫描频率，提升 PC 端发送的捕获率
+                self.is_first_scan = False # 完成第一次完整扫描
+                time.sleep(1) # 扫描步长调节
         finally:
-            comtypes.CoUninitialize()
+            print("[OK] WeChat automation initialized")
         print("WeChatMessageListener stopped.")
 
 if __name__ == "__main__":

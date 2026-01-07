@@ -95,14 +95,30 @@ export const AIExpertConfig: React.FC = () => {
     try {
       // 判断是新建还是编辑
       const isEditing = editingPrompt !== null;
-      const url = isEditing
-        ? `http://localhost:5000/api/ai/prompts/${editingPrompt.id}`
-        : 'http://localhost:5000/api/ai/prompts';
-      const method = isEditing ? 'PUT' : 'POST';
 
-      // 1. 保存 Prompt 配置
-      const response = await fetch(url, {
-        method: method,
+      // 1. 如果是新建，先创建基础 Prompt 获取 ID
+      let promptId = isEditing ? editingPrompt.id : null;
+
+      if (!isEditing) {
+        const createRes = await fetch('http://localhost:5000/api/ai/prompts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(config)
+        });
+        const createData = await createRes.json();
+        if (createData.success) {
+          promptId = createData.prompt_id;
+        } else {
+          alert('创建失败：' + createData.error);
+          return;
+        }
+      }
+
+      // 2. 调用全量更新接口（不管是新建还是编辑，后续流程一致）
+      // 这一步会原子化地保存 Prompt、Keywords 和 Preset QA，避免网络延迟导致的冗余
+      const updateUrl = `http://localhost:5000/api/ai/prompts/${promptId}/full-update`;
+      const response = await fetch(updateUrl, {
+        method: 'POST',
         headers: {
           'Content-Type': 'application/json'
         },
@@ -111,74 +127,10 @@ export const AIExpertConfig: React.FC = () => {
 
       const data = await response.json();
       if (data.success) {
-        const promptId = isEditing ? editingPrompt.id : data.prompt_id;
-
-        // 2. 保存关键词规则（编辑时先删除旧的）
-        if (isEditing) {
-          // 删除旧的关键词
-          const oldKeywords = await fetch(`http://localhost:5000/api/ai/keywords?prompt_id=${promptId}`);
-          const oldKeywordsData = await oldKeywords.json();
-          if (oldKeywordsData.success && oldKeywordsData.keywords) {
-            for (const kw of oldKeywordsData.keywords) {
-              await fetch(`http://localhost:5000/api/ai/keywords/${kw.id}`, { method: 'DELETE' });
-            }
-          }
-        }
-
-        if (config.keywords && config.keywords.length > 0) {
-          for (const keyword of config.keywords) {
-            await fetch('http://localhost:5000/api/ai/keywords', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                prompt_id: promptId,
-                keyword: keyword.keyword,
-                match_type: keyword.match_type,
-                priority: keyword.priority
-              })
-            });
-          }
-        }
-
-        // 3. 保存预设问答（编辑时先删除旧的）
-        if (isEditing) {
-          // 删除旧的预设问答
-          const oldQA = await fetch(`http://localhost:5000/api/ai/preset-qa?prompt_id=${promptId}`);
-          const oldQAData = await oldQA.json();
-          if (oldQAData.success && oldQAData.preset_qa) {
-            for (const qa of oldQAData.preset_qa) {
-              await fetch(`http://localhost:5000/api/ai/preset-qa/${qa.id}`, { method: 'DELETE' });
-            }
-          }
-        }
-
-        if (config.preset_qa && config.preset_qa.length > 0) {
-          for (const qa of config.preset_qa) {
-            // 处理多关键词格式：如果是数组，取第一个；如果是字符串，直接使用
-            const questionPattern = Array.isArray(qa.question_patterns) && qa.question_patterns.length > 0
-              ? qa.question_patterns[0]  // 暂时只保存第一个关键词
-              : qa.question_pattern || '';
-
-            if (questionPattern) {
-              await fetch('http://localhost:5000/api/ai/preset-qa', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  prompt_id: promptId,
-                  question_pattern: questionPattern,
-                  answer: qa.answer,
-                  match_type: qa.match_type,
-                  priority: qa.priority
-                })
-              });
-            }
-          }
-        }
-
         alert(isEditing ? '配置更新成功！' : '配置保存成功！');
         setShowWizard(false);
         setEditingPrompt(null);
-        loadPrompts();
+        await loadPrompts(); // 刷新列表
       } else {
         alert('保存失败：' + data.error);
       }
@@ -202,7 +154,7 @@ export const AIExpertConfig: React.FC = () => {
       // 合并数据（修正字段名：keywords <- rules, preset_qa <- qa_list）
       const fullPrompt = {
         ...prompt,
-        keywords: keywordsData.success ? keywordsData.rules : [],
+        keywords: keywordsData.success ? keywordsData.keywords : [], // 关键修复：rules -> keywords
         preset_qa: qaData.success ? qaData.qa_list.map((qa: any) => ({
           ...qa,
           // 兼容新格式：将单个 question_pattern 转换为 question_patterns 数组
@@ -277,8 +229,8 @@ export const AIExpertConfig: React.FC = () => {
             <button
               onClick={() => setActiveTab('configs')}
               className={`py-3 px-2 border-b-2 font-medium text-sm transition-colors ${activeTab === 'configs'
-                  ? 'border-blue-500 text-blue-600'
-                  : 'border-transparent text-gray-500 hover:text-gray-700'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
                 }`}
             >
               📋 我的配置
@@ -286,8 +238,8 @@ export const AIExpertConfig: React.FC = () => {
             <button
               onClick={() => setActiveTab('favorites')}
               className={`py-3 px-2 border-b-2 font-medium text-sm transition-colors ${activeTab === 'favorites'
-                  ? 'border-blue-500 text-blue-600'
-                  : 'border-transparent text-gray-500 hover:text-gray-700'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
                 }`}
             >
               ⭐ 收藏话术
@@ -295,8 +247,8 @@ export const AIExpertConfig: React.FC = () => {
             <button
               onClick={() => setActiveTab('knowledge')}
               className={`py-3 px-2 border-b-2 font-medium text-sm transition-colors ${activeTab === 'knowledge'
-                  ? 'border-blue-500 text-blue-600'
-                  : 'border-transparent text-gray-500 hover:text-gray-700'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
                 }`}
             >
               📚 知识库管理
