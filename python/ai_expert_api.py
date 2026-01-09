@@ -15,6 +15,11 @@ from ai_expert.knowledge_base_manager import KnowledgeBaseManager
 from ai_expert.message_queue_manager import MessageQueueManager
 from ai_expert.background_processor import BackgroundProcessor
 from ai_expert.analytics_manager import AnalyticsManager
+from ai_expert.logger import api_logger as logger
+from ai_expert.constants import (
+    RATE_LIMIT_AI_GENERATE, RATE_LIMIT_WINDOW,
+    MAX_MESSAGES_PER_SESSION
+)
 import json
 import os
 import threading
@@ -43,32 +48,27 @@ analytics_manager = AnalyticsManager(db)
 # 全局后台处理器实例
 bg_processor = None
 
-# API Key 管理（从配置文件读取）
-def get_api_key():
-    """获取 DeepSeek API Key"""
-    config_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'ai_config.json')
-    
-    if os.path.exists(config_path):
-        with open(config_path, 'r', encoding='utf-8') as f:
-            config = json.load(f)
-            return config.get('deepseek_api_key', '')
-    
-    return ''
+# API Key 管理（优先环境变量，兼容旧配置文件）
+def get_api_key() -> str:
+    """获取 DeepSeek API Key - 使用统一配置管理"""
+    from ai_expert.config import Config
+    return Config.get_deepseek_api_key()
 
 def start_background_worker():
     """初始化并启动后台预生成服务"""
     global bg_processor
     api_key = get_api_key()
     if not api_key:
-        print("[AI Expert] Warning: API key not found, background worker not started.")
+        logger.warning("API key not found, background worker not started")
+        logger.warning("Please set DEEPSEEK_API_KEY environment variable or configure in .env file")
         return
 
     from ai_expert.enhanced_reply_generator import EnhancedReplyGenerator
     generator = EnhancedReplyGenerator(api_key, db, kb_manager=kb_manager)
-    
+
     bg_processor = BackgroundProcessor(db, queue_manager, generator)
     bg_processor.start()
-    print("[AI Expert] Background worker pipeline initialized and running.")
+    logger.info("Background worker pipeline initialized and running")
 
 # ========== 配置管理模块已合并到下方 [配置管理 API] 区域 ==========
 
@@ -124,8 +124,8 @@ def get_prompts():
     """获取所有配置"""
     try:
         prompts = db.get_all_prompts()
-        print(f"[DEBUG] 获取 {len(prompts)} 个配置")
-        
+        logger.debug(f"获取 {len(prompts)} 个配置")
+
         # 解析 JSON 字段并获取关键词规则和预设问答
         for prompt in prompts:
             # 解析 JSON 字段
@@ -133,26 +133,26 @@ def get_prompts():
                 prompt['knowledge_base'] = json.loads(prompt['knowledge_base'])
             if prompt.get('forbidden_words'):
                 prompt['forbidden_words'] = json.loads(prompt['forbidden_words'])
-            
+
             # 获取关键词规则
             try:
                 keywords = db.get_keyword_rules(prompt['id'])
                 prompt['keywords'] = keywords if keywords else []
-                print(f"[DEBUG] {prompt['name']} - keywords: {len(prompt['keywords'])}")
+                logger.debug(f"{prompt['name']} - keywords: {len(prompt['keywords'])}")
             except Exception as kw_err:
-                print(f"[DEBUG] {prompt['name']} - keywords 错误: {kw_err}")
+                logger.warning(f"{prompt['name']} - keywords 错误: {kw_err}")
                 prompt['keywords'] = []
-            
+
             # 获取预设问答
             try:
                 preset_qa = db.get_preset_qa(prompt['id'])
                 prompt['preset_qa'] = preset_qa if preset_qa else []
-                print(f"[DEBUG] {prompt['name']} - preset_qa: {len(prompt['preset_qa'])}")
+                logger.debug(f"{prompt['name']} - preset_qa: {len(prompt['preset_qa'])}")
             except Exception as qa_err:
-                print(f"[DEBUG] {prompt['name']} - preset_qa 错误: {qa_err}")
+                logger.warning(f"{prompt['name']} - preset_qa 错误: {qa_err}")
                 prompt['preset_qa'] = []
-        
-        print(f"[DEBUG] 返回 {len(prompts)} 个增强的配置")
+
+        logger.debug(f"返回 {len(prompts)} 个增强的配置")
         return jsonify({
             'success': True,
             'prompts': prompts
@@ -224,7 +224,7 @@ def full_update_prompt(prompt_id):
     """一键全量保存：Prompt 配置 + 关键词规则 + 预设问答（事务化版本）"""
     try:
         data = request.json
-        print(f"[API] Full update triggered for prompt {prompt_id}")
+        logger.info(f"Full update triggered for prompt {prompt_id}")
 
         # 生成最新的 System Prompt
         system_prompt = prompt_builder.build_system_prompt(data)
@@ -280,129 +280,118 @@ def delete_prompt(prompt_id):
 
 # ========== AI 生成 API ==========
 
+from ai_expert.rate_limiter import rate_limit
+from ai_expert.error_handler import handle_errors, ValidationError, APIKeyError, ExternalAPIError
+
 @ai_expert_bp.route('/generate', methods=['POST'])
+@rate_limit(max_requests=20, window_seconds=60)  # 每分钟最多 20 次 AI 生成
+@handle_errors  # 统一错误处理
 def generate_reply():
     """生成 AI 回复建议"""
-    try:
-        data = request.json
-        session_id = data.get('session_id')
-        customer_message = data.get('customer_message')
-        conversation_history = data.get('conversation_history', [])  # 可选的会话历史
-        prompt_id = data.get('prompt_id')  # 用户选择的 AI 专家 ID
+    data = request.json or {}
+    session_id = data.get('session_id')
+    customer_message = data.get('customer_message')
+    conversation_history = data.get('conversation_history', [])
+    prompt_id = data.get('prompt_id')
 
-        if not session_id or not customer_message:
-            return jsonify({
-                'success': False,
-                'error': 'Missing required fields: session_id and customer_message'
-            }), 400
-
-        # ========== 用户选择 AI 专家 ==========
-        if prompt_id:
-            # 用户指定了 AI 专家
-            active_prompt = db.get_prompt_by_id(prompt_id)
-            if not active_prompt:
-                return jsonify({
-                    'success': False,
-                    'error': f'AI 专家配置不存在 (ID: {prompt_id})'
-                }), 400
-            print(f"[AI生成] 使用用户选择的 AI 专家: {active_prompt.get('name', 'Unknown')} (ID: {prompt_id})")
-        else:
-            # 用户未指定，使用默认激活的配置
-            active_prompt = db.get_active_prompt()
-            if not active_prompt:
-                return jsonify({
-                    'success': False,
-                    'error': '请先创建并激活一个 AI 专家配置，或在生成时选择 AI 专家'
-                }), 400
-            print(f"[AI生成] 使用默认激活的 AI 专家: {active_prompt.get('name', 'Unknown')} (ID: {active_prompt['id']})")
-
-        # 获取 API Key
-        api_key = get_api_key()
-        if not api_key:
-            return jsonify({
-                'success': False,
-                'error': 'DeepSeek API Key not configured'
-            }), 400
-
-        # 初始化 Adapter
-        deepseek_adapter = DeepSeekAdapter(api_key)
-
-        # 先尝试匹配预设问答 (传入 deepseek_adapter 以支持语义匹配)
-        preset_answer = db.match_preset_answer(active_prompt['id'], customer_message, deepseek_adapter=deepseek_adapter)
-
-        if preset_answer:
-            # 如果匹配到预设答案，直接返回（三个版本都用预设答案）
-            return jsonify({
-                'success': True,
-                'suggestions': {
-                    'aggressive': preset_answer,
-                    'conservative': preset_answer,
-                    'professional': preset_answer
-                },
-                'is_preset': True,
-                'tokens_used': 0,
-                'cost': 0,
-                'response_time': 0
-            })
-
-        # 没有匹配到预设答案，使用增强版 AI 生成
-        generator = EnhancedReplyGenerator(api_key, db, kb_manager=kb_manager)
-
-        # 解析配置（将 JSON 字符串转换为字典/列表）
-        knowledge_base_raw = active_prompt.get('knowledge_base', '[]')
-        forbidden_words_raw = active_prompt.get('forbidden_words', '[]')
-        
-        # 安全解析 JSON 字符串
-        try:
-            knowledge_base = json.loads(knowledge_base_raw) if isinstance(knowledge_base_raw, str) else knowledge_base_raw
-        except:
-            knowledge_base = []
-        
-        try:
-            forbidden_words = json.loads(forbidden_words_raw) if isinstance(forbidden_words_raw, str) else forbidden_words_raw
-        except:
-            forbidden_words = []
-        
-        system_prompt_config = {
-            'role_definition': active_prompt.get('role_definition', ''),
-            'business_logic': active_prompt.get('business_logic', ''),
-            'tone_style': active_prompt.get('tone_style', 'professional'),
-            'reply_length': active_prompt.get('reply_length', 'medium'),
-            'emoji_usage': active_prompt.get('emoji_usage', 'occasional'),
-            'knowledge_base': knowledge_base,
-            'forbidden_words': forbidden_words
-        }
-
-        # 生成三个版本（使用增强版生成器）
-        result = generator.generate_three_versions(
-            session_id=session_id,
-            customer_message=customer_message,
-            system_prompt_config=system_prompt_config,
-            prompt_id=active_prompt['id'],
-            conversation_history=conversation_history
-        )
-
-        return jsonify({
-            'success': result['success'],
-            'suggestions': {
-                'aggressive': result['aggressive'],
-                'conservative': result['conservative'],
-                'professional': result['professional']
-            },
-            'suggestion_id': result.get('suggestion_id'),
-            'metadata': result.get('metadata', {}),
-            'tokens_used': result.get('tokens_used', 0),
-            'cost': result.get('cost', 0),
-            'response_time': result.get('response_time', 0)
+    # 参数验证
+    if not session_id or not customer_message:
+        raise ValidationError('缺少必填字段', details={
+            'required': ['session_id', 'customer_message'],
+            'received': list(data.keys())
         })
 
-    except Exception as e:
-        import traceback
-        traceback.print_exc()  # 打印详细错误信息
+    # ========== 用户选择 AI 专家 ==========
+    if prompt_id:
+        active_prompt = db.get_prompt_by_id(prompt_id)
+        if not active_prompt:
+            raise ValidationError(f'AI 专家配置不存在 (ID: {prompt_id})')
+        logger.info(f"使用用户选择的 AI 专家: {active_prompt.get('name', 'Unknown')} (ID: {prompt_id})")
+    else:
+        active_prompt = db.get_active_prompt()
+        if not active_prompt:
+            raise ValidationError('请先创建并激活一个 AI 专家配置，或在生成时选择 AI 专家')
+        logger.info(f"使用默认激活的 AI 专家: {active_prompt.get('name', 'Unknown')} (ID: {active_prompt['id']})")
+
+    # 获取 API Key
+    api_key = get_api_key()
+    if not api_key:
+        raise APIKeyError('DeepSeek API Key 未配置')
+
+    # 初始化 Adapter
+    deepseek_adapter = DeepSeekAdapter(api_key)
+
+    # 先尝试匹配预设问答 (传入 deepseek_adapter 以支持语义匹配)
+    preset_answer = db.match_preset_answer(active_prompt['id'], customer_message, deepseek_adapter=deepseek_adapter)
+
+    if preset_answer:
+        # 如果匹配到预设答案，直接返回（三个版本都用预设答案）
         return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
+            'success': True,
+            'suggestions': {
+                'aggressive': preset_answer,
+                'conservative': preset_answer,
+                'professional': preset_answer
+            },
+            'is_preset': True,
+            'tokens_used': 0,
+            'cost': 0,
+            'response_time': 0
+        })
+
+    # 没有匹配到预设答案，使用增强版 AI 生成
+    generator = EnhancedReplyGenerator(api_key, db, kb_manager=kb_manager)
+
+    # 解析配置（将 JSON 字符串转换为字典/列表）
+    knowledge_base_raw = active_prompt.get('knowledge_base', '[]')
+    forbidden_words_raw = active_prompt.get('forbidden_words', '[]')
+
+    # 安全解析 JSON 字符串
+    try:
+        knowledge_base = json.loads(knowledge_base_raw) if isinstance(knowledge_base_raw, str) else knowledge_base_raw
+    except:
+        knowledge_base = []
+
+    try:
+        forbidden_words = json.loads(forbidden_words_raw) if isinstance(forbidden_words_raw, str) else forbidden_words_raw
+    except:
+        forbidden_words = []
+
+    system_prompt_config = {
+        'role_definition': active_prompt.get('role_definition', ''),
+        'business_logic': active_prompt.get('business_logic', ''),
+        'tone_style': active_prompt.get('tone_style', 'professional'),
+        'reply_length': active_prompt.get('reply_length', 'medium'),
+        'emoji_usage': active_prompt.get('emoji_usage', 'occasional'),
+        'knowledge_base': knowledge_base,
+        'forbidden_words': forbidden_words
+    }
+
+    # 生成三个版本（使用增强版生成器）
+    result = generator.generate_three_versions(
+        session_id=session_id,
+        customer_message=customer_message,
+        system_prompt_config=system_prompt_config,
+        prompt_id=active_prompt['id'],
+        conversation_history=conversation_history
+    )
+
+    if not result.get('success'):
+        raise ExternalAPIError(result.get('error', 'AI 生成失败'))
+
+    return jsonify({
+        'success': result['success'],
+        'suggestions': {
+            'aggressive': result['aggressive'],
+            'conservative': result['conservative'],
+            'professional': result['professional']
+        },
+        'suggestion_id': result.get('suggestion_id'),
+        'metadata': result.get('metadata', {}),
+        'tokens_used': result.get('tokens_used', 0),
+        'cost': result.get('cost', 0),
+        'response_time': result.get('response_time', 0)
+    })
 
 # ========== 版本选择记录 API（改进点5：反馈学习）==========
 
@@ -519,7 +508,7 @@ def submit_feedback():
         action = data.get('action') # 'ACCEPTED' or 'MODIFIED'
         prompt_id = data.get('prompt_id')
 
-        print(f"[Feedback] Rcvd: {action} | Orig: {original_reply[:10]}... | Final: {final_reply[:10]}...")
+        logger.info(f"Feedback received: {action} | Orig: {(original_reply or '')[:10]}... | Final: {(final_reply or '')[:10]}...")
 
         # 1. 记录反馈日志
         db.add_reply_feedback(
@@ -540,14 +529,14 @@ def submit_feedback():
              # 保存到金牌话术库
              if prompt_id:
                  db.add_golden_reply(prompt_id, user_query, final_reply)
-                 print(f"[Learning] Saved Golden Reply for prompt {prompt_id}")
+                 logger.info(f"Saved Golden Reply for prompt {prompt_id}")
         
         return jsonify({
             'success': True
         })
 
     except Exception as e:
-        print(f"[Feedback Error] {e}")
+        logger.error(f"Feedback error: {e}")
         return jsonify({
             'success': False,
             'error': str(e)
@@ -749,9 +738,9 @@ def delete_session(session_id):
         # URL 解码
         session_id = unquote(session_id)
 
-        print(f"[DEBUG] Deleting session: {session_id}")
+        logger.debug(f"Deleting session: {session_id}")
         deleted_count = db.delete_session_messages(session_id)
-        print(f"[DEBUG] Deleted {deleted_count} messages")
+        logger.debug(f"Deleted {deleted_count} messages")
 
         return jsonify({
             'success': True,
@@ -759,9 +748,7 @@ def delete_session(session_id):
         })
 
     except Exception as e:
-        print(f"[ERROR] Failed to delete session: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Failed to delete session: {str(e)}", exc_info=True)
         return jsonify({
             'success': False,
             'error': str(e)
@@ -1330,7 +1317,7 @@ def bulk_generate_replies():
                     queue_manager.update_status(task['id'], 'FAILED', error_msg=result.get('error'))
                     
             except Exception as task_err:
-                print(f"[Bulk Gen Error] Task {task['id']}: {task_err}")
+                logger.error(f"Bulk Gen Error - Task {task['id']}: {task_err}")
                 queue_manager.update_status(task['id'], 'FAILED', error_msg=str(task_err))
 
         return jsonify({
@@ -1371,7 +1358,7 @@ def get_analytics_dashboard():
                 # 这里简单处理：如果失败则降级
                 insights = analytics_manager.get_ai_insights(generator_fn)
         except Exception as ai_err:
-            print(f"[Analytics AI Error] {ai_err}")
+            logger.warning(f"Analytics AI Error: {ai_err}")
             insights = "AI 简报生成超时或失败，但不影响核心数据查看。"
         
         return jsonify({

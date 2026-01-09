@@ -225,15 +225,19 @@ class WeChatMessageListener(threading.Thread):
                 # 4. 状态对比与上报
                 is_update = False
                 if nickname not in self.last_states:
-                    self.last_states[nickname] = state_id
-                    # 🔧 初次扫描：如果有未读且是客户，必须立即补发
-                    if self.is_first_scan and unread > 0 and not is_self:
-                        print(f"[监听器] 初次发现积压消息: {nickname}")
+                    # 🔧 BUG修复：首次遇到的会话，如果有未读消息，必须立即推送
+                    # 不再限制只在 is_first_scan 阶段才推送
+                    if unread > 0 and not is_self:
+                        print(f"[监听器] 发现新会话有未读消息: {nickname} (未读数: {unread})")
                         is_update = True
                     else:
+                        # 无未读消息的新会话，仅记录状态，不推送
+                        print(f"[监听器] 记录新会话状态: {nickname}")
+                    self.last_states[nickname] = state_id
+                    if not is_update:
                         continue
-                
-                if not is_update and self.last_states[nickname] != state_id:
+                elif self.last_states[nickname] != state_id:
+                    # 已知会话的状态发生变化
                     print(f"[监听器] 状态变动: {nickname}")
                     is_update = True
 
@@ -280,7 +284,14 @@ class WeChatMessageListener(threading.Thread):
                     }
                     self.last_states[nickname] = state_id
 
-                    print(f"[DEBUG] 推送消息: {msg_data}")
+                    # 🔧 增强调试日志
+                    print("=" * 60)
+                    print(f"[消息推送] 会话: {nickname}")
+                    print(f"[消息推送] 内容: {content[:30]}..." if len(content) > 30 else f"[消息推送] 内容: {content}")
+                    print(f"[消息推送] 未读数: {unread}")
+                    print(f"[消息推送] 发送者判定: {'【我的消息】' if final_is_self else '【对方消息】'}")
+                    print(f"[消息推送] is_self = {final_is_self}")
+                    print("=" * 60)
 
                     if self.callback:
                         self.callback(msg_data)

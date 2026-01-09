@@ -5,6 +5,7 @@ import { AIExpertConfig } from './pages/AIExpertConfig';
 import BatchKanbanPage from './pages/BatchKanbanPage';
 import AnalyticsPage from './pages/AnalyticsPage';
 import { Settings } from './pages/Settings';
+import { MessageProvider } from './contexts';
 
 type Page = 'dashboard' | 'ai-expert' | 'settings' | 'kanban' | 'analytics';
 
@@ -29,9 +30,11 @@ function App() {
   };
 
   return (
-    <MainLayout currentPage={currentPage} onNavigate={setCurrentPage}>
-      {renderPage()}
-    </MainLayout>
+    <MessageProvider>
+      <MainLayout currentPage={currentPage} onNavigate={setCurrentPage}>
+        {renderPage()}
+      </MainLayout>
+    </MessageProvider>
   );
 }
 

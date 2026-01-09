@@ -1,174 +1,47 @@
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { MessageSquare, Bell, RefreshCw, Trash2, X } from 'lucide-react';
 import { InlineReplyGenerator } from './AIExpert/InlineReplyGenerator';
-
-interface Message {
-    session: string;
-    sender: string;
-    content: string;
-    unread: number;
-    is_self: boolean;
-    time: string;
-    id?: number; // 消息ID，用于删除
-}
-
-interface ChatSession {
-    id: string; // 昵称作为 ID
-    lastMessage: string;
-    lastTime: string;
-    unreadCount: number;
-    messages: Message[];
-}
+import { useMessages } from '../contexts';
+import { AutoReplyControl } from './AutoReplyControl';
+import { ToastContainer } from './Toast';
 
 const MessageCenter = () => {
-    // 从 localStorage 恢复会话数据
-    const [sessions, setSessions] = useState<Record<string, ChatSession>>(() => {
-        try {
-            const saved = localStorage.getItem('wechat_sessions');
-            return saved ? JSON.parse(saved) : {};
-        } catch {
-            return {};
-        }
-    });
-    const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-    const [isConnected, setIsConnected] = useState(false);
-    const [isRetrying, setIsRetrying] = useState(true); // 初始状态为正在连接
+    // 使用全局消息状态
+    const {
+        sessions,
+        activeSessionId,
+        setActiveSessionId,
+        isConnected,
+        isRetrying,
+        deleteSession,
+        deleteMessage,
+        clearUnread,
+        autoReplyConfig,
+        setAutoReplyConfig,
+        toasts,
+        closeToast
+    } = useMessages();
+
     const [hoveredMessageIndex, setHoveredMessageIndex] = useState<number | null>(null);
     const scrollRef = useRef<HTMLDivElement>(null);
-    const eventSourceRef = useRef<EventSource | null>(null);
-
-    // 保存会话数据到 localStorage
-    useEffect(() => {
-        try {
-            localStorage.setItem('wechat_sessions', JSON.stringify(sessions));
-        } catch (error) {
-            console.error('Failed to save sessions to localStorage:', error);
-        }
-    }, [sessions]);
 
     const sortedSessionIds = Object.keys(sessions).sort((a, b) => {
-        // 简单的按最后一条消息时间排序 (由于格式是 HH:MM:SS，直接对比字符串即可)
         return sessions[b].lastTime.localeCompare(sessions[a].lastTime);
     });
 
-    const heartbeatTimerRef = useRef<NodeJS.Timeout | null>(null);
-    const lastHeartbeatRef = useRef<number>(Date.now());
-
-    const connectSSE = () => {
-        if (eventSourceRef.current) eventSourceRef.current.close();
-        if (heartbeatTimerRef.current) clearInterval(heartbeatTimerRef.current);
-
-        setIsRetrying(true);
-        const es = new EventSource('http://127.0.0.1:5000/api/messages/stream');
-        eventSourceRef.current = es;
-        lastHeartbeatRef.current = Date.now();
-
-        // 启动连接监视器：如果 30 秒没动静（包括心跳），判为僵尸连接，强制重启
-        const monitorInterval = setInterval(() => {
-            const now = Date.now();
-            if (now - lastHeartbeatRef.current > 30000) {
-                console.warn("[SSE] Watchdog detected zombie connection, reconnecting...");
-                setIsConnected(false);
-                setIsRetrying(true);
-                es.close();
-                clearInterval(monitorInterval);
-                setTimeout(connectSSE, 2000);
-            }
-        }, 10000);
-        heartbeatTimerRef.current = monitorInterval;
-
-        es.onopen = () => {
-            console.log("[SSE] Connected to backend message stream");
-            setIsConnected(true);
-            setIsRetrying(false);
-            lastHeartbeatRef.current = Date.now();
-        };
-
-        es.onmessage = (event) => {
-            lastHeartbeatRef.current = Date.now(); // 只要有任何数据流（哪怕是心跳），就刷新活跃时间
-
-            try {
-                // 忽略非数据包（如有）
-                if (!event.data) return;
-
-                const data = JSON.parse(event.data);
-
-                // 🔧 关键修复：如果是心跳包，直接跳过解析，仅用于刷新活跃时间（已在上面完成）
-                if (data.type === 'heartbeat' || !data.session) {
-                    console.log("[SSE] Received heartbeat at", data.time);
-                    return;
-                }
-
-                const msg: Message = data;
-                const sid = msg.session;
-
-                setSessions(prev => {
-                    const existing = prev[sid] || {
-                        id: sid,
-                        lastMessage: '',
-                        lastTime: '',
-                        unreadCount: 0,
-                        messages: []
-                    };
-
-                    return {
-                        ...prev,
-                        [sid]: {
-                            ...existing,
-                            lastMessage: msg.content,
-                            lastTime: msg.time,
-                            unreadCount: msg.is_self ? 0 : (existing.unreadCount + 1),
-                            messages: [...existing.messages, msg].slice(-100)
-                        }
-                    };
-                });
-            } catch (e) {
-                // console.log("SSE non-json or heartbeat received:", event.data);
-            }
-        };
-
-        es.onerror = (err) => {
-            console.error("[SSE] Connection error:", err);
-            setIsConnected(false);
-            setIsRetrying(true);
-            es.close();
-            clearInterval(monitorInterval);
-            setTimeout(connectSSE, 5000);
-        };
+    // 选择会话时清除未读数
+    const handleSelectSession = (id: string) => {
+        setActiveSessionId(id);
+        clearUnread(id);
     };
-
-    useEffect(() => {
-        connectSSE();
-        return () => {
-            eventSourceRef.current?.close();
-            if (heartbeatTimerRef.current) clearInterval(heartbeatTimerRef.current);
-        };
-    }, []);
 
     // 删除单条消息
     const handleDeleteMessage = async (sessionId: string, messageIndex: number) => {
         if (!confirm('确定要删除这条消息吗？')) {
             return;
         }
-
-        // 从本地状态中删除
-        setSessions(prev => {
-            const session = prev[sessionId];
-            if (!session) return prev;
-
-            const newMessages = session.messages.filter((_, idx) => idx !== messageIndex);
-
-            return {
-                ...prev,
-                [sessionId]: {
-                    ...session,
-                    messages: newMessages,
-                    lastMessage: newMessages.length > 0 ? newMessages[newMessages.length - 1].content : '',
-                    lastTime: newMessages.length > 0 ? newMessages[newMessages.length - 1].time : ''
-                }
-            };
-        });
+        deleteMessage(sessionId, messageIndex);
     };
 
     // 删除整个会话
@@ -178,40 +51,9 @@ const MessageCenter = () => {
         }
 
         try {
-            console.log(`[DEBUG] Deleting session: ${sessionId}`);
-
-            // 调用后端 API 删除会话
-            const response = await fetch(`http://localhost:5000/api/ai/context/session/${encodeURIComponent(sessionId)}`, {
-                method: 'DELETE'
-            });
-
-            console.log(`[DEBUG] Response status: ${response.status}`);
-
-            const data = await response.json();
-            console.log(`[DEBUG] Response data:`, data);
-
-            if (data.success) {
-                console.log(`[DEBUG] Successfully deleted ${data.deleted_count} messages`);
-
-                // 从本地状态中删除
-                setSessions(prev => {
-                    const newSessions = { ...prev };
-                    delete newSessions[sessionId];
-                    return newSessions;
-                });
-
-                // 如果删除的是当前激活的会话，清空选择
-                if (activeSessionId === sessionId) {
-                    setActiveSessionId(null);
-                }
-
-                alert(`成功删除 ${data.deleted_count} 条消息`);
-            } else {
-                console.error('[ERROR] Delete failed:', data.error);
-                alert(`删除会话失败: ${data.error}`);
-            }
+            await deleteSession(sessionId);
+            alert('会话删除成功');
         } catch (error) {
-            console.error('[ERROR] Failed to delete session:', error);
             alert(`删除会话失败: ${error}`);
         }
     };
@@ -225,7 +67,16 @@ const MessageCenter = () => {
     const activeSession = activeSessionId ? sessions[activeSessionId] : null;
 
     return (
-        <div className="bg-white rounded-2xl shadow-xl border border-gray-200 flex h-[600px] overflow-hidden antialiased relative">
+        <>
+            {/* Toast 通知容器 */}
+            <ToastContainer toasts={toasts} onClose={closeToast} />
+
+            {/* 自动回复控制面板 */}
+            <div className="mb-4">
+                <AutoReplyControl config={autoReplyConfig} onChange={setAutoReplyConfig} />
+            </div>
+
+            <div className="bg-white rounded-2xl shadow-xl border border-gray-200 flex h-[600px] overflow-hidden antialiased relative">
             {/* Session List (Left) */}
             <div className="w-64 border-r border-gray-100 flex flex-col bg-[#f0f0f0]/50 backdrop-blur-sm">
                 <div className="p-4 border-b border-gray-100 flex items-center justify-between">
@@ -252,7 +103,7 @@ const MessageCenter = () => {
                     ${activeSessionId === id ? 'bg-white shadow-sm ring-1 ring-black/5' : 'hover:bg-black/5'}`}
                                 >
                                     <div
-                                        onClick={() => setActiveSessionId(id)}
+                                        onClick={() => handleSelectSession(id)}
                                         className="flex items-center space-x-3 flex-1 min-w-0 cursor-pointer"
                                     >
                                         <div className="w-10 h-10 bg-gradient-to-br from-gray-200 to-gray-300 rounded-lg flex items-center justify-center text-gray-500 font-bold text-sm shrink-0">
@@ -356,6 +207,7 @@ const MessageCenter = () => {
                 </div>
             )}
         </div>
+        </>
     );
 };
 

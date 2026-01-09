@@ -1,5 +1,4 @@
-import { app, BrowserWindow, ipcMain } from 'electron'
-
+import { app, BrowserWindow } from 'electron'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 
@@ -67,31 +66,4 @@ app.on('activate', () => {
 
 app.whenReady().then(() => {
   createWindow()
-
-  // Handle manual trigger
-  ipcMain.on('scan-contacts-trigger', async () => {
-    win?.webContents.send('scan-status', 'start');
-    try {
-      await runScan();
-    } catch (err) {
-      console.error('Scan trigger failed:', err);
-      win?.webContents.send('scan-status', 'error');
-    }
-  });
-
-  // Internal helper to run scan
-  ipcMain.handle('scan-contacts', async () => {
-    return runScan();
-  });
-
-  async function runScan() {
-    return new Promise((resolve) => {
-      console.log('Contact scan feature is not available (script removed during cleanup)')
-      // 返回空数组，因为联系人扫描脚本已被清理
-      // 如果需要此功能，请重新实现 python/contact_reader.py
-      win?.webContents.send('scan-status', 'complete')
-      resolve([])
-    })
-  }
-
 })

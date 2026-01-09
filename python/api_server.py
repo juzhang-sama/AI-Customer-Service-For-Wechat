@@ -1,16 +1,24 @@
-
-
+# -*- coding: utf-8 -*-
+"""
+API Server - 安全增强版
+"""
+import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from wechat_auto import WeChatAutomation
 from message_listener import WeChatMessageListener
 from ai_expert_api import ai_expert_bp
+from ai_expert.auth import require_auth, optional_auth
 import threading
 import json
 import time
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+
+# ========== 安全增强: CORS 配置 ==========
+# 生产环境应该限制允许的域名
+ALLOWED_ORIGINS = os.environ.get('ALLOWED_ORIGINS', 'http://localhost:5173,http://localhost:3000').split(',')
+CORS(app, origins=ALLOWED_ORIGINS, supports_credentials=True)
 
 # 注册 AI Expert Blueprint
 from ai_expert_api import ai_expert_bp, start_background_worker
@@ -82,6 +90,7 @@ def get_status():
 
 @app.route('/api/send', methods=['POST'])
 def send_msg():
+    """发送消息 - 本地应用无需认证"""
     import comtypes
     comtypes.CoInitialize()
     data = request.json
@@ -90,10 +99,10 @@ def send_msg():
     message = data.get('message')
     print(f"[DEBUG] who = {repr(who)}")
     print(f"[DEBUG] message = {repr(message)}")
-    
+
     if not who or not message:
         return jsonify({"status": "error", "message": "Missing 'who' or 'message'"}), 400
-        
+
     try:
         result = bot.send_message(who, message)
         return jsonify(result)

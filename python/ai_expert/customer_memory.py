@@ -28,7 +28,7 @@ class CustomerMemory:
         """初始化客户记忆表"""
         conn = self.db.get_connection()
         cursor = conn.cursor()
-        
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS customer_memory (
                 session_id TEXT PRIMARY KEY,
@@ -44,9 +44,9 @@ class CustomerMemory:
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
+
         conn.commit()
-        conn.close()
+        # 不要关闭连接，因为它是共享的线程本地连接
     
     def get_memory(self, session_id: str) -> Dict:
         """获取客户记忆"""

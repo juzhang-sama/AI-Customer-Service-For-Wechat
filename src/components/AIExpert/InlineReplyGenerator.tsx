@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { Sparkles, Copy, Send, Loader2, AlertCircle, Check, Edit2, Brain, Info, Zap, ChevronDown, ChevronUp, History } from 'lucide-react';
+import { Sparkles, Copy, Send, Loader2, AlertCircle, Check, Edit2, Brain, Info, Zap, ChevronDown, ChevronUp, History, Bot } from 'lucide-react';
 import ReplyHistorySidebar from './ReplyHistorySidebar';
+import { useMessages } from '../../contexts';
 
 interface Message {
   session: string;
@@ -106,6 +107,10 @@ export const InlineReplyGenerator: React.FC<InlineReplyGeneratorProps> = ({
   messages,
   onReplySelect
 }) => {
+  // 获取自动回复配置
+  const { autoReplyConfig } = useMessages();
+  const isAutoMode = autoReplyConfig.enabled;
+
   const [, setIsExpanded] = useState(false);
   const [replies, setReplies] = useState<ReplyVersion[]>([]);
   const [loading, setLoading] = useState(false);
@@ -285,7 +290,23 @@ export const InlineReplyGenerator: React.FC<InlineReplyGeneratorProps> = ({
   };
 
   return (
-    <div className="flex flex-col h-full bg-gradient-to-b from-gray-50/50 to-white/50 backdrop-blur-xl">
+    <div className="flex flex-col h-full bg-gradient-to-b from-gray-50/50 to-white/50 backdrop-blur-xl relative">
+      {/* 自动模式遮罩层 */}
+      {isAutoMode && (
+        <div className="absolute inset-0 z-50 bg-gray-900/60 backdrop-blur-sm flex flex-col items-center justify-center">
+          <div className="bg-white rounded-2xl p-6 shadow-2xl text-center max-w-xs mx-4">
+            <Bot className="w-12 h-12 text-green-500 mx-auto mb-3 animate-pulse" />
+            <h4 className="font-bold text-gray-800 mb-2">自动回复模式已开启</h4>
+            <p className="text-sm text-gray-500 mb-4">
+              系统将自动处理客户消息，无需手动操作
+            </p>
+            <div className="text-xs text-gray-400 bg-gray-50 rounded-lg p-3">
+              <p>💡 如需手动回复，请先关闭自动模式</p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 标题栏 */}
       <div className="p-4 border-b border-white/20 bg-white/40 sticky top-0 z-10 backdrop-blur-md">
         <h3 className="font-bold text-gray-800 flex items-center justify-between tracking-tight w-full">
@@ -294,10 +315,16 @@ export const InlineReplyGenerator: React.FC<InlineReplyGeneratorProps> = ({
             <span className="bg-clip-text text-transparent bg-gradient-to-r from-purple-600 to-blue-600">
               AI 智能回复 2.0
             </span>
+            {isAutoMode && (
+              <span className="ml-2 px-2 py-0.5 bg-green-100 text-green-600 text-[10px] font-bold rounded-full">
+                自动
+              </span>
+            )}
           </div>
           <button
             onClick={() => setShowHistory(!showHistory)}
-            className={`p-2 rounded-lg transition-all ${showHistory ? 'bg-blue-100 text-blue-600' : 'text-gray-400 hover:bg-gray-100'}`}
+            disabled={isAutoMode}
+            className={`p-2 rounded-lg transition-all ${showHistory ? 'bg-blue-100 text-blue-600' : 'text-gray-400 hover:bg-gray-100'} ${isAutoMode ? 'opacity-50 cursor-not-allowed' : ''}`}
             title="查看历史记录"
           >
             <History className="w-4 h-4" />

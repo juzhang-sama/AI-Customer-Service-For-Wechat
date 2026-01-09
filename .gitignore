@@ -57,6 +57,14 @@ knowledge_base/
 uploads/
 config/ai_config.json
 
+# Security - 敏感配置文件
+.env
+.env.local
+.env.production
+*.pem
+*.key
+secrets/
+
 # Build & Release
 dist/
 release/

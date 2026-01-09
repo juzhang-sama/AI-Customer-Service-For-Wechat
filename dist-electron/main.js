@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow } from "electron";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 const __dirname$1 = path.dirname(fileURLToPath(import.meta.url));
@@ -37,25 +37,6 @@ app.on("activate", () => {
 });
 app.whenReady().then(() => {
   createWindow();
-  ipcMain.on("scan-contacts-trigger", async () => {
-    win == null ? void 0 : win.webContents.send("scan-status", "start");
-    try {
-      await runScan();
-    } catch (err) {
-      console.error("Scan trigger failed:", err);
-      win == null ? void 0 : win.webContents.send("scan-status", "error");
-    }
-  });
-  ipcMain.handle("scan-contacts", async () => {
-    return runScan();
-  });
-  async function runScan() {
-    return new Promise((resolve) => {
-      console.log("Contact scan feature is not available (script removed during cleanup)");
-      win == null ? void 0 : win.webContents.send("scan-status", "complete");
-      resolve([]);
-    });
-  }
 });
 export {
   MAIN_DIST,

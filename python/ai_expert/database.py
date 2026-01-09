@@ -6,23 +6,50 @@ AI Expert Database Module
 
 import sqlite3
 import json
+import threading
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
+from contextlib import contextmanager
 import os
 
 class AIExpertDatabase:
+    """数据库管理类 - 每次操作创建新连接以避免连接关闭问题"""
+
     def __init__(self, db_path: str = "ai_expert.db"):
         self.db_path = db_path
+        self._init_wal_mode()  # 只在初始化时设置一次 WAL 模式
         self.init_database()
-    
-    def get_connection(self):
-        """获取数据库连接，增强并发能力"""
-        conn = sqlite3.connect(self.db_path, timeout=30.0) # 提高超时容忍度
-        conn.row_factory = sqlite3.Row  # 返回字典格式
-        # 开启 WAL 模式，支持并发读写，减少 Database Locked 概率
+
+    def _init_wal_mode(self):
+        """初始化时设置 WAL 模式（只需执行一次）"""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.execute("PRAGMA journal_mode=WAL")
+        conn.close()
+
+    def get_connection(self):
+        """获取数据库连接 - 每次创建新连接"""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.row_factory = sqlite3.Row
         return conn
-    
+
+    @contextmanager
+    def get_cursor(self):
+        """上下文管理器 - 自动管理游标和事务"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            yield cursor
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            raise e
+        finally:
+            conn.close()
+
+    def close_connection(self):
+        """关闭连接 - 保留接口兼容性，但不做任何事"""
+        pass
+
     def init_database(self):
         """初始化数据库表"""
         conn = self.get_connection()
